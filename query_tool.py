@@ -12,7 +12,6 @@ def main():
     parser.add_argument("--cp", help="Código postal exacto")
     parser.add_argument("--export", choices=["excel", "json"], help="Exportar resultados")
     parser.add_argument("--output", default="resultados_busqueda", help="Nombre del archivo de salida (sin extensión)")
-    parser.add_argument("--sin-pujas", action="store_true", help="Filtrar solo subastas sin pujas")
 
     args = parser.parse_args()
 
@@ -24,13 +23,16 @@ def main():
     if args.min_price: filters["min_price"] = args.min_price
     if args.max_price: filters["max_price"] = args.max_price
     if args.cp: filters["cp"] = args.cp
-    if args.sin_pujas: filters["sin_pujas"] = True
 
-    results = db.query_auctions(filters)
+    results = engine.search_auctions(**filters)
 
     print(f"\n--- Resultados de la búsqueda ({len(results)} encontrados) ---")
     for r in results[:10]: # Show first 10
-        print(f"ID: {r['identificador']} | Provincia: {r['provincia']} | Precio: {r['precio_salida']}€ | URL: {r['url']}")
+        # Adapt keys for preview display
+        id_val = r.get('identificador', r.get('auction_id', 'N/A'))
+        prov = r.get('bien_provincia', 'N/A')
+        price = r.get('valor_subasta', 'N/A')
+        print(f"ID: {id_val} | Provincia: {prov} | Precio: {price}€")
 
     if len(results) > 10:
         print(f"... y {len(results) - 10} más.")

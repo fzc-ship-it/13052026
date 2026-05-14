@@ -7,58 +7,47 @@ class QueryEngine:
         self.db = db_manager
 
     def search_auctions(self, province=None, min_price=None, max_price=None, cp=None):
-        """Perform search with structured filters."""
+        """Perform search with structured filters on the flat lot results."""
         filters = {
             "provincia": province,
             "min_price": min_price,
             "max_price": max_price,
             "cp": cp
         }
-        # Remove None values
         filters = {k: v for k, v in filters.items() if v is not None}
 
-        results = self.db.query_auctions(filters)
+        results = self.db.get_flat_results(filters)
         return results
 
-    def get_as_dataframe(self, results):
-        """Converts results to a pandas DataFrame."""
+    def export_to_excel(self, results, filename="subastas_reporte.xlsx"):
+        """Exports results to a flat Excel file where each row is a Lot."""
         if not results:
-            return pd.DataFrame()
-        return pd.DataFrame(results)
+            return False
 
-    def export_to_excel(self, results, filename="filtered_auctions.xlsx"):
-        """Exports results to an Excel file."""
-        df = self.get_as_dataframe(results)
-        if not df.empty:
-            # We don't want to include the full raw_data in the Excel usually,
-            # or maybe we do? Let's drop it for the summary but keep the rest.
-            if 'raw_data' in df.columns:
-                df = df.drop(columns=['raw_data'])
-            df.to_excel(filename, index=False)
-            return True
-        return False
+        df = pd.DataFrame(results)
 
-    def export_to_json(self, results, filename="filtered_auctions.json"):
-        """Exports results to a JSON file."""
+        # Reorder columns to have Auction metadata first
+        cols = list(df.columns)
+        metadata_cols = [
+            'identificador', 'tipo_subasta', 'fecha_inicio', 'fecha_conclusion',
+            'autoridad_gestora_codigo', 'autoridad_gestora_telefono', 'autoridad_gestora_email',
+            'estado_proceso', 'url'
+        ]
+        lot_cols = [c for c in cols if c not in metadata_cols and c != 'raw_data' and c != 'last_updated']
+
+        # Filter existing columns
+        metadata_cols = [c for c in metadata_cols if c in cols]
+        lot_cols = [c for c in lot_cols if c in cols]
+
+        final_cols = metadata_cols + lot_cols
+        df = df[final_cols]
+
+        df.to_excel(filename, index=False)
+        return True
+
+    def export_to_json(self, results, filename="subastas_reporte.json"):
         if not results:
             return False
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(results, f, ensure_ascii=False, indent=4)
         return True
-
-if __name__ == "__main__":
-    # Quick test of the QueryEngine
-    db = DatabaseManager(db_name="test_boe.db")
-    engine = QueryEngine(db)
-
-    # Get all
-    all_auctions = engine.search_auctions()
-    print(f"Found {len(all_auctions)} auctions in total.")
-
-    # Filter by price if any
-    expensive = engine.search_auctions(min_price=100000)
-    print(f"Found {len(expensive)} auctions over 100k.")
-
-    # Export
-    engine.export_to_json(all_auctions, "test_export.json")
-    print("Exported to test_export.json")
