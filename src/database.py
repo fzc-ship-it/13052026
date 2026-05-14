@@ -5,6 +5,13 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+STATUS_MAPPING = {
+    "PU": "Próxima apertura",
+    "EJ": "Celebrándose (Activa)",
+    "PC": "Concluida en Portal de Subastas",
+    "FS": "Finalizada por Autoridad Gestora"
+}
+
 class DatabaseManager:
     def __init__(self, db_name="boe_auctions.db"):
         self.db_name = db_name
@@ -82,6 +89,9 @@ class DatabaseManager:
         if not identificador:
             return
 
+        # Map status code to human readable description
+        estado_desc = STATUS_MAPPING.get(status_code, status_code)
+
         tiene_lotes = 1 if auction_data.get("lotes") and auction_data.get("lotes") != "Sin lotes" else 0
 
         with sqlite3.connect(self.db_name) as conn:
@@ -104,7 +114,7 @@ class DatabaseManager:
                 auction_data.get("código"),
                 auction_data.get("teléfono"),
                 auction_data.get("correo_electrónico"),
-                status_code,
+                estado_desc,
                 json.dumps(auction_data),
                 datetime.now().isoformat()
             ))
