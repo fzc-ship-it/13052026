@@ -89,17 +89,16 @@ class BOEScraper:
             await StealthManager.human_delay()
 
     async def scan_all_ids(self, status):
-        """Quickly scans all result pages for a status and returns a set of IDs."""
-        all_ids = set()
+        """Quickly scans all result pages for a status and returns a dict of {id: url}."""
+        all_data = {}
         logger.info(f"Scanning all IDs for status {status}...")
         while True:
             links = await self.get_auction_links()
             for link in links:
                 try:
-                    # Extract idSub from URL
                     match = re.search(r'idSub=([^&]+)', link)
                     if match:
-                        all_ids.add(match.group(1))
+                        all_data[match.group(1)] = link
                 except Exception:
                     pass
 
@@ -107,7 +106,7 @@ class BOEScraper:
                 await self.go_to_next_page()
             else:
                 break
-        return all_ids
+        return all_data
 
     async def extract_auction_details(self, url):
         """Comprehensive extraction with retries and missing data fixes."""
@@ -125,6 +124,8 @@ class BOEScraper:
                 # Tab 1: Información General
                 general_data = await self._extract_table_data()
                 if "identificador" not in general_data:
+                    # Capture screenshot on failure
+                    await self.page.screenshot(path=f"fail_tab1_{attempt}.png")
                     raise Exception("Identification data missing")
 
                 details.update(general_data)
@@ -138,6 +139,7 @@ class BOEScraper:
             except Exception as e:
                 if attempt == max_retries - 1:
                     logger.error(f"Failed to extract Tab 1 for {url}: {e}")
+                    await self.page.screenshot(path="final_fail_extract.png")
                     return details
                 await asyncio.sleep(2)
 
@@ -151,11 +153,11 @@ class BOEScraper:
 
         # Determine if single or multi lot
         lotes_str = details.get("lotes", "Sin lotes")
-        has_lotes = lotes_str != "Sin lotes" and lotes_str != "" and "1" not in lotes_str # Simple check
-        if lotes_str != "Sin lotes":
+        has_lotes = False
+        if lotes_str != "Sin lotes" and lotes_str != "":
             match = re.search(r'(\d+)', lotes_str)
-            if match and int(match.group(1)) <= 1:
-                has_lotes = False
+            if match and int(match.group(1)) > 1:
+                has_lotes = True
 
         if not has_lotes:
             # Pestaña: Bienes (ver=3) - Single lot

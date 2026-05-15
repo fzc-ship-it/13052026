@@ -6,10 +6,10 @@ class QueryEngine:
     def __init__(self, db_manager: DatabaseManager):
         self.db = db_manager
 
-    def search_auctions(self, province=None, min_price=None, max_price=None, cp=None):
+    def search_auctions(self, provincia=None, min_price=None, max_price=None, cp=None):
         """Perform search with structured filters on the flat lot results."""
         filters = {
-            "provincia": province,
+            "provincia": provincia,
             "min_price": min_price,
             "max_price": max_price,
             "cp": cp
