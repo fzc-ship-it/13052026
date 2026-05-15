@@ -24,11 +24,26 @@ Este sistema avanzado permite automatizar la extracción, sincronización y cons
 
 ## Guía de Uso
 
-### 1. Ejecutar la Sincronización Diaria
-Este comando realiza el escaneo rápido y descarga solo las nuevas subastas:
-```bash
-python main.py
-```
+### 1. Ejecutar la Sincronización
+
+- **Sincronización Diaria (Rápida)**:
+  Escanea las subastas activas y próximas, detecta cambios y descarga solo las nuevas altas.
+  ```bash
+  python main.py
+  ```
+
+- **Carga Inicial / Histórica**:
+  Si es la primera vez que usas el scraper o quieres recuperar subastas ya finalizadas, usa el argumento `--days`:
+  ```bash
+  # Ejemplo: Recuperar subastas finalizadas en los últimos 30 días
+  python main.py --days 30
+  ```
+
+- **Modo Visible**:
+  Para ver el navegador en acción (útil para depuración):
+  ```bash
+  python main.py --visible
+  ```
 
 ### 2. Consultar y Filtrar Datos
 Utiliza `query_tool.py` para trabajar con los datos almacenados en `boe_auctions.db`.

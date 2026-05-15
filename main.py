@@ -7,7 +7,7 @@ from src.database import DatabaseManager
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def run_sync(headless=True):
+async def run_sync(headless=True, days=0):
     db = DatabaseManager()
     scraper = BOEScraper(headless=headless)
 
@@ -59,10 +59,29 @@ async def run_sync(headless=True):
                 logger.info(f"Transitioning {ident}: Active -> Concluded")
                 db.update_auction_status(ident, "PC")
 
-        # 3. NEW AUCTIONS PHASE: Scraping details only for unseen IDs
+        # 3. HISTORICAL PHASE (Optional)
+        if days > 0:
+            from datetime import datetime, timedelta
+            today = datetime.now()
+            start_date = today - timedelta(days=days)
+            date_str = start_date.strftime("%Y-%m-%d")
+            today_str = today.strftime("%Y-%m-%d")
+
+            logger.info(f"--- STEP 4: Scanning HISTORICAL Concluded auctions ({days} days) ---")
+            await scraper.navigate_to_search()
+            await scraper.select_property_type()
+            await scraper.select_auction_status("PC")
+            await scraper.set_date_range("fin", date_str, today_str)
+            await scraper.perform_search()
+            hist_scan = await scraper.scan_all_ids("PC")
+            for ident, url in hist_scan.items():
+                if ident not in portal_data:
+                    portal_data[ident] = {"url": url, "status": "PC"}
+
+        # 4. NEW AUCTIONS PHASE: Scraping details only for unseen IDs
         new_ids = [ident for ident in portal_data if not db.auction_exists(ident)]
 
-        logger.info(f"--- STEP 4: Scraping {len(new_ids)} NEW auctions ---")
+        logger.info(f"--- STEP 5: Scraping {len(new_ids)} NEW/UNSEEN auctions ---")
 
         for ident in new_ids:
             try:
@@ -83,6 +102,7 @@ async def run_sync(headless=True):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BOE Auction Scraper Sync")
     parser.add_argument("--visible", action="store_true", help="Run browser in visible mode")
+    parser.add_argument("--days", type=int, default=0, help="Number of historical days to fetch (for Concluded auctions)")
     args = parser.parse_args()
 
-    asyncio.run(run_sync(headless=not args.visible))
+    asyncio.run(run_sync(headless=not args.visible, days=args.days))

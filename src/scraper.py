@@ -61,6 +61,17 @@ class BOEScraper:
         await self.page.click(f"input[name='dato[2]'][value='{status}']", force=True)
         await StealthManager.human_delay(500, 1500)
 
+    async def set_date_range(self, date_type, start_date, end_date):
+        """Sets date range for search.
+        date_type: 'inicio' or 'fin'
+        start_date, end_date: string 'YYYY-MM-DD'
+        """
+        field_idx = "18" if date_type == "inicio" else "17"
+        logger.info(f"Setting {date_type} date range: {start_date} to {end_date}")
+        await self.page.fill(f"input[name='dato[{field_idx}][0]']", start_date)
+        await self.page.fill(f"input[name='dato[{field_idx}][1]']", end_date)
+        await StealthManager.human_delay(500, 1500)
+
     async def perform_search(self):
         await self.page.click("input[name='accion'][value='Buscar']")
         await self.page.wait_for_load_state("networkidle")
