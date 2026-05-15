@@ -57,7 +57,6 @@ class BOEScraper:
         await StealthManager.human_delay(500, 1500)
 
     async def select_auction_status(self, status):
-        """PU: Próxima, EJ: Celebrándose, PC: Concluida, FS: Finalizada por Gestora"""
         logger.info(f"Selecting status: {status}")
         await self.page.click(f"input[name='dato[2]'][value='{status}']", force=True)
         await StealthManager.human_delay(500, 1500)
@@ -89,60 +88,115 @@ class BOEScraper:
             await self.page.wait_for_load_state("networkidle")
             await StealthManager.human_delay()
 
-    async def extract_auction_details(self, url):
-        """Comprehensive extraction of all tabs and lots."""
-        logger.info(f"Extracting full details from {url}")
-        await self.page.goto(url, wait_until="networkidle")
+    async def scan_all_ids(self, status):
+        """Quickly scans all result pages for a status and returns a set of IDs."""
+        all_ids = set()
+        logger.info(f"Scanning all IDs for status {status}...")
+        while True:
+            links = await self.get_auction_links()
+            for link in links:
+                try:
+                    # Extract idSub from URL
+                    match = re.search(r'idSub=([^&]+)', link)
+                    if match:
+                        all_ids.add(match.group(1))
+                except Exception:
+                    pass
 
+            if await self.has_next_page():
+                await self.go_to_next_page()
+            else:
+                break
+        return all_ids
+
+    async def extract_auction_details(self, url):
+        """Comprehensive extraction with retries and missing data fixes."""
+        logger.info(f"Extracting full details from {url}")
+
+        # Retry mechanism for navigation and initial data
+        max_retries = 3
         details = {"url": url}
 
-        # 1. Pestaña: Información General (ver=1)
-        details.update(await self._extract_table_data())
+        for attempt in range(max_retries):
+            try:
+                await self.page.goto(url, wait_until="networkidle", timeout=30000)
+                await StealthManager.human_delay(1000, 2000)
+
+                # Tab 1: Información General
+                general_data = await self._extract_table_data()
+                if "identificador" not in general_data:
+                    raise Exception("Identification data missing")
+
+                details.update(general_data)
+
+                # Check for mandatory dates with small additional wait if missing
+                if not details.get("fecha_de_inicio") or not details.get("fecha_de_conclusión"):
+                    await asyncio.sleep(2)
+                    details.update(await self._extract_table_data())
+
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"Failed to extract Tab 1 for {url}: {e}")
+                    return details
+                await asyncio.sleep(2)
 
         # 2. Pestaña: Autoridad Gestora (ver=2)
         tab_2_url = self._get_tab_url(url, "2")
-        await self.page.goto(tab_2_url, wait_until="networkidle")
-        details.update(await self._extract_table_data())
+        try:
+            await self.page.goto(tab_2_url, wait_until="networkidle")
+            details.update(await self._extract_table_data())
+        except Exception:
+            pass
 
-        # Check if multiple lots exist
+        # Determine if single or multi lot
         lotes_str = details.get("lotes", "Sin lotes")
-        has_lotes = lotes_str != "Sin lotes" and lotes_str != ""
+        has_lotes = lotes_str != "Sin lotes" and lotes_str != "" and "1" not in lotes_str # Simple check
+        if lotes_str != "Sin lotes":
+            match = re.search(r'(\d+)', lotes_str)
+            if match and int(match.group(1)) <= 1:
+                has_lotes = False
 
         if not has_lotes:
-            # 3. Pestaña: Bienes (ver=3) - Single lot case
+            # Pestaña: Bienes (ver=3) - Single lot
             tab_3_url = self._get_tab_url(url, "3")
-            await self.page.goto(tab_3_url, wait_until="networkidle")
-            details.update(await self._extract_table_data())
+            try:
+                await self.page.goto(tab_3_url, wait_until="networkidle")
+                bienes_data = await self._extract_table_data()
+                details.update(bienes_data)
+                details["tipologia"] = self._extract_tipologia(bienes_data.get("bien", ""))
+            except Exception:
+                pass
         else:
-            # 4. Pestaña: Lotes (ver=3) - Multi-lot case
-            num_lotes_match = re.search(r'(\d+)', lotes_str)
-            num_lotes = int(num_lotes_match.group(1)) if num_lotes_match else 0
-
+            # Pestaña: Lotes (ver=3) - Multi-lot
+            num_lotes = int(re.search(r'(\d+)', lotes_str).group(1))
             lots_data = []
             for i in range(1, num_lotes + 1):
                 lot_url = self._get_lot_url(url, i)
-                logger.info(f"Processing lot {i}/{num_lotes} at {lot_url}")
-                await self.page.goto(lot_url, wait_until="networkidle")
-
-                lot_info = {"lote_numero": i}
-                # Economic data is in Tab 3 (Lotes list or individual lot detail)
-                lot_info.update(await self._extract_table_data())
-
-                # Bien details for the lot are in ver=3 with idLote, but usually it requires another click
-                # Or sometimes the data is already there. Let's try to extract from the lot page.
-                # If "Referencia Catastral" is missing, we might need to check if there's a specific "Bien" link for the lot.
-
-                lots_data.append(lot_info)
-
+                try:
+                    await self.page.goto(lot_url, wait_until="networkidle")
+                    lot_info = {"lote_numero": i}
+                    lot_table = await self._extract_table_data()
+                    lot_info.update(lot_table)
+                    lot_info["tipologia"] = self._extract_tipologia(lot_table.get("bien", ""))
+                    lots_data.append(lot_info)
+                except Exception:
+                    pass
             details["lots_data"] = lots_data
 
         return details
+
+    def _extract_tipologia(self, bien_text):
+        """Extracts text inside parenthesis, e.g., 'Inmueble (Vivienda)' -> 'Vivienda'"""
+        match = re.search(r'\(([^)]+)\)', bien_text)
+        if match:
+            return match.group(1).strip()
+        return bien_text.replace("Inmueble", "").replace("-", "").strip()
 
     def _get_tab_url(self, base_url, ver_value):
         parsed = urlparse(base_url)
         query = parse_qs(parsed.query)
         query['ver'] = [ver_value]
-        # Remove idLote if we are moving to a general tab
         if 'idLote' in query: del query['idLote']
         new_query = urlencode(query, doseq=True)
         return urlunparse(parsed._replace(query=new_query))
@@ -165,9 +219,7 @@ class BOEScraper:
                 key = await th.inner_text()
                 value = await td.inner_text()
                 clean_key = key.strip().lower().replace(" ", "_").replace(":", "").replace("\n", "")
-                # Normalize specific common keys
                 if "identificador" in clean_key: clean_key = "identificador"
                 if "código_postal" in clean_key: clean_key = "código_postal"
-
                 data[clean_key] = value.strip()
         return data

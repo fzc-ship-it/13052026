@@ -7,9 +7,9 @@ logger = logging.getLogger(__name__)
 
 STATUS_MAPPING = {
     "PU": "Próxima apertura",
-    "EJ": "Celebrándose (Activa)",
-    "PC": "Concluida en Portal de Subastas",
-    "FS": "Finalizada por Autoridad Gestora"
+    "EJ": "Celebrándose",
+    "PC": "Concluida",
+    "FS": "Finalizada"
 }
 
 class DatabaseManager:
@@ -20,7 +20,6 @@ class DatabaseManager:
     def _init_db(self):
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            # Auctions table (Parent)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS auctions (
                     identificador TEXT PRIMARY KEY,
@@ -38,7 +37,6 @@ class DatabaseManager:
                 )
             """)
 
-            # Lots/Property table (Child)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS lots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,6 +49,7 @@ class DatabaseManager:
                     importe_deposito REAL,
                     tramos_entre_pujas TEXT,
                     bien_tipo TEXT,
+                    tipologia TEXT,
                     bien_descripcion TEXT,
                     bien_direccion TEXT,
                     bien_referencia_catastral TEXT,
@@ -73,31 +72,43 @@ class DatabaseManager:
             cursor.execute("SELECT 1 FROM auctions WHERE identificador = ?", (identificador,))
             return cursor.fetchone() is not None
 
+    def update_auction_status(self, identificador, new_status_code):
+        status_desc = STATUS_MAPPING.get(new_status_code, new_status_code)
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE auctions SET estado_proceso = ?, last_updated = ? WHERE identificador = ?",
+                           (status_desc, datetime.now().isoformat(), identificador))
+            conn.commit()
+
+    def get_auctions_by_status(self, status_descriptions):
+        """Returns IDs and URLs of auctions in given statuses."""
+        with sqlite3.connect(self.db_name) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            placeholders = ','.join(['?'] * len(status_descriptions))
+            cursor.execute(f"SELECT identificador, url, estado_proceso FROM auctions WHERE estado_proceso IN ({placeholders})", status_descriptions)
+            return [dict(row) for row in cursor.fetchall()]
+
     def _parse_price(self, value):
         if not value or not isinstance(value, str):
             return 0.0
         try:
-            # Handle formats like "123.456,78 €" or just "123456.78"
             clean = value.replace("€", "").replace(".", "").replace(",", ".").strip()
             return float(clean)
         except (ValueError, AttributeError):
             return 0.0
 
     def save_full_auction(self, auction_data, status_code):
-        """Saves an auction and all its associated lots."""
         identificador = auction_data.get("identificador")
         if not identificador:
             return
 
-        # Map status code to human readable description
         estado_desc = STATUS_MAPPING.get(status_code, status_code)
-
         tiene_lotes = 1 if auction_data.get("lotes") and auction_data.get("lotes") != "Sin lotes" else 0
 
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
 
-            # 1. Insert/Update Parent Auction
             cursor.execute("""
                 INSERT OR REPLACE INTO auctions
                 (identificador, url, tipo_subasta, fecha_inicio, fecha_conclusion, tiene_lotes,
@@ -119,25 +130,21 @@ class DatabaseManager:
                 datetime.now().isoformat()
             ))
 
-            # 2. Clear old lots for this auction to avoid duplicates on update
             cursor.execute("DELETE FROM lots WHERE auction_id = ?", (identificador,))
 
-            # 3. Insert Lots
             lots_list = auction_data.get("lots_data", [])
             if not lots_list:
-                # Handle single lot (data is in the main auction object)
-                # Map fields from the main object to the lot structure
                 cursor.execute("""
                     INSERT INTO lots
                     (auction_id, lote_numero, cantidad_reclamada, valor_subasta, tasacion,
-                     puja_minima, importe_deposito, tramos_entre_pujas, bien_tipo, bien_descripcion,
+                     puja_minima, importe_deposito, tramos_entre_pujas, bien_tipo, tipologia, bien_descripcion,
                      bien_direccion, bien_referencia_catastral, bien_idufir, bien_codigo_postal,
                      bien_localidad, bien_provincia, bien_vivienda_habitual, bien_situacion_posesoria,
                      bien_visitable, bien_cargas)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     identificador,
-                    0, # Single lot indicator
+                    0,
                     self._parse_price(auction_data.get("cantidad_reclamada")),
                     self._parse_price(auction_data.get("valor_subasta")),
                     self._parse_price(auction_data.get("tasación")),
@@ -145,6 +152,7 @@ class DatabaseManager:
                     self._parse_price(auction_data.get("importe_del_depósito")),
                     auction_data.get("tramos_entre_pujas"),
                     auction_data.get("bien"),
+                    auction_data.get("tipologia"),
                     auction_data.get("descripción"),
                     auction_data.get("dirección"),
                     auction_data.get("referencia_catastral"),
@@ -158,16 +166,15 @@ class DatabaseManager:
                     auction_data.get("cargas")
                 ))
             else:
-                # Handle multiple lots
                 for lot in lots_list:
                     cursor.execute("""
                         INSERT INTO lots
                         (auction_id, lote_numero, cantidad_reclamada, valor_subasta, tasacion,
-                         puja_minima, importe_deposito, tramos_entre_pujas, bien_tipo, bien_descripcion,
+                         puja_minima, importe_deposito, tramos_entre_pujas, bien_tipo, tipologia, bien_descripcion,
                          bien_direccion, bien_referencia_catastral, bien_idufir, bien_codigo_postal,
                          bien_localidad, bien_provincia, bien_vivienda_habitual, bien_situacion_posesoria,
-                         bien_visitable, bien_cargas)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        bien_visitable, bien_cargas)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         identificador,
                         lot.get("lote_numero"),
@@ -178,6 +185,7 @@ class DatabaseManager:
                         self._parse_price(lot.get("importe_del_depósito_del_lote")),
                         lot.get("tramos_entre_pujas"),
                         lot.get("bien"),
+                        lot.get("tipologia"),
                         lot.get("descripción"),
                         lot.get("dirección"),
                         lot.get("referencia_catastral"),
@@ -193,7 +201,6 @@ class DatabaseManager:
             conn.commit()
 
     def get_flat_results(self, filters=None):
-        """Joins auctions and lots for a flat report."""
         query = """
             SELECT a.*, l.*
             FROM auctions a
