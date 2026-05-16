@@ -89,6 +89,24 @@ class DatabaseManager:
             cursor.execute(f"SELECT identificador, url, estado_proceso FROM auctions WHERE estado_proceso IN ({placeholders})", status_descriptions)
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_incomplete_auctions(self):
+        """Identifies auctions with missing critical fields."""
+        query = """
+            SELECT a.identificador, a.url
+            FROM auctions a
+            JOIN lots l ON a.identificador = l.auction_id
+            WHERE a.fecha_inicio IS NULL OR a.fecha_inicio = ''
+               OR a.fecha_conclusion IS NULL OR a.fecha_conclusion = ''
+               OR a.autoridad_gestora_codigo IS NULL OR a.autoridad_gestora_codigo = ''
+               OR l.bien_descripcion IS NULL OR l.bien_descripcion = ''
+               OR (a.tiene_lotes = 0 AND (l.valor_subasta = 0 OR l.valor_subasta IS NULL))
+        """
+        with sqlite3.connect(self.db_name) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(query)
+            return [dict(row) for row in cursor.fetchall()]
+
     def _parse_price(self, value):
         if not value or not isinstance(value, str):
             return 0.0
@@ -120,11 +138,11 @@ class DatabaseManager:
                 auction_data.get("url"),
                 auction_data.get("tipo_de_subasta"),
                 auction_data.get("fecha_de_inicio"),
-                auction_data.get("fecha_de_conclusión"),
+                auction_data.get("fecha_de_conclusion"),
                 tiene_lotes,
-                auction_data.get("código"),
-                auction_data.get("teléfono"),
-                auction_data.get("correo_electrónico"),
+                auction_data.get("codigo"),
+                auction_data.get("telefono"),
+                auction_data.get("correo_electronico"),
                 estado_desc,
                 json.dumps(auction_data),
                 datetime.now().isoformat()
@@ -147,21 +165,21 @@ class DatabaseManager:
                     0,
                     self._parse_price(auction_data.get("cantidad_reclamada")),
                     self._parse_price(auction_data.get("valor_subasta")),
-                    self._parse_price(auction_data.get("tasación")),
-                    self._parse_price(auction_data.get("puja_mínima")),
-                    self._parse_price(auction_data.get("importe_del_depósito")),
+                    self._parse_price(auction_data.get("tasacion")),
+                    self._parse_price(auction_data.get("puja_minima")),
+                    self._parse_price(auction_data.get("importe_del_deposito")),
                     auction_data.get("tramos_entre_pujas"),
                     auction_data.get("bien"),
                     auction_data.get("tipologia"),
-                    auction_data.get("descripción"),
-                    auction_data.get("dirección"),
+                    auction_data.get("descripcion"),
+                    auction_data.get("direccion"),
                     auction_data.get("referencia_catastral"),
                     auction_data.get("idufir"),
-                    auction_data.get("código_postal"),
+                    auction_data.get("codigo_postal"),
                     auction_data.get("localidad"),
                     auction_data.get("provincia"),
                     auction_data.get("vivienda_habitual"),
-                    auction_data.get("situación_posesoria"),
+                    auction_data.get("situacion_posesoria"),
                     auction_data.get("visitable"),
                     auction_data.get("cargas")
                 ))
@@ -179,22 +197,22 @@ class DatabaseManager:
                         identificador,
                         lot.get("lote_numero"),
                         self._parse_price(lot.get("cantidad_reclamada")),
-                        self._parse_price(lot.get("valor_subasta_del_lote")),
-                        self._parse_price(lot.get("valor_de_tasación_del_lote")),
-                        self._parse_price(lot.get("puja_mínima_del_lote")),
-                        self._parse_price(lot.get("importe_del_depósito_del_lote")),
+                        self._parse_price(lot.get("valor_subasta")),
+                        self._parse_price(lot.get("tasacion")),
+                        self._parse_price(lot.get("puja_minima")),
+                        self._parse_price(lot.get("importe_del_deposito")),
                         lot.get("tramos_entre_pujas"),
                         lot.get("bien"),
                         lot.get("tipologia"),
-                        lot.get("descripción"),
-                        lot.get("dirección"),
+                        lot.get("descripcion"),
+                        lot.get("direccion"),
                         lot.get("referencia_catastral"),
                         lot.get("idufir"),
-                        lot.get("código_postal"),
+                        lot.get("codigo_postal"),
                         lot.get("localidad"),
                         lot.get("provincia"),
                         lot.get("vivienda_habitual"),
-                        lot.get("situación_posesoria"),
+                        lot.get("situacion_posesoria"),
                         lot.get("visitable"),
                         lot.get("cargas")
                     ))

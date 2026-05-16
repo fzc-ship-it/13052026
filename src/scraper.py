@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import os
+import random
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from playwright.async_api import async_playwright
 from src.stealth_manager import StealthManager
@@ -190,73 +191,91 @@ class BOEScraper:
         return all_data
 
     async def extract_auction_details(self, url):
+        """Comprehensive extraction with strict verification and retries for missing fields."""
         logger.info(f"Extracting full details from {url}")
 
         max_retries = 3
         details = {"url": url}
 
-        for attempt in range(max_retries):
-            try:
-                await self._safe_goto(url)
-                await StealthManager.simulate_human_scroll(self.page)
+        # We define required fields to trigger a retry if they are missing
+        critical_fields = ["identificador"] # Relaxed for now, will check dates later
+        data_selector = "div#idBloqueDatos1 table, table.tablaFormulario, table"
 
+        for attempt in range(max_retries):
+            # Reset details each retry to ensure fresh load
+            details = {"url": url}
+
+            try:
                 # Tab 1: Información General
-                general_data = await self._extract_table_data()
-                if "identificador" not in general_data:
-                    logger.warning(f"Attempt {attempt}: Data table not found. Waiting/Pausing...")
-                    if not self.headless:
-                        print("!!! CAPTCHA OR BLOCK DETECTED !!! Resolve it and then continue in terminal.")
-                        await self.page.pause()
-                    await asyncio.sleep(5)
+                await self._safe_goto(url)
+                await self.page.wait_for_selector(data_selector, timeout=15000)
+                details.update(await self._extract_table_data())
+
+                # Check for critical fields in Tab 1
+                missing_critical = [f for f in critical_fields if not details.get(f)]
+                if missing_critical:
+                    logger.warning(f"Attempt {attempt}: Missing critical fields {missing_critical}. Retrying...")
+                    await asyncio.sleep(3)
                     continue
 
-                details.update(general_data)
-                break
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    await self.log_diagnostic(f"extract_fail_{details.get('identificador', 'unknown')}")
-                    return details
-                await asyncio.sleep(5)
+                # Tab 2: Autoridad Gestora
+                await StealthManager.human_delay(1500, 3500)
+                await self._safe_goto(self._get_tab_url(url, "2"))
+                await self.page.wait_for_selector(data_selector, timeout=10000)
+                gestora_data = await self._extract_table_data()
+                details.update(gestora_data)
 
-        # Tabs 2, 3...
-        for ver in ["2", "3"]:
-            try:
-                tab_url = self._get_tab_url(url, ver)
-                await self._safe_goto(tab_url)
-                data = await self._extract_table_data()
+                # Tab 3: Bienes / Lotes
+                await StealthManager.human_delay(1500, 3500)
+                await self._safe_goto(self._get_tab_url(url, "3"))
+                # In Tab 3, it might be a list of lots or direct Bien data
+                await self.page.wait_for_selector(data_selector, timeout=10000)
 
-                if ver == "3":
-                    # Capture the "Bien" text from the H4 header if it's a single lot
+                lotes_str = details.get("lotes", "Sin lotes")
+                has_lotes = False
+                if lotes_str != "Sin lotes" and lotes_str != "":
+                    match = re.search(r'(\d+)', lotes_str)
+                    if match and int(match.group(1)) > 1:
+                        has_lotes = True
+
+                if not has_lotes:
+                    # Single lot
                     h4 = await self.page.query_selector("h4")
+                    bienes_data = await self._extract_table_data()
                     if h4:
-                        bien_header = await h4.inner_text()
-                        data["bien"] = bien_header
-                    details["tipologia"] = self._extract_tipologia(data.get("bien", ""))
+                        bienes_data["bien"] = await h4.inner_text()
+                    details["tipologia"] = self._extract_tipologia(bienes_data.get("bien", ""))
+                    details.update(bienes_data)
 
-                details.update(data)
-            except Exception:
-                pass
-
-        # Check for lots
-        lotes_str = details.get("lotes", "Sin lotes")
-        if lotes_str != "Sin lotes" and lotes_str != "":
-            match = re.search(r'(\d+)', lotes_str)
-            if match and int(match.group(1)) > 1:
-                num_lotes = int(match.group(1))
-                lots_data = []
-                for i in range(1, num_lotes + 1):
-                    lot_url = self._get_lot_url(url, i)
-                    try:
+                    if not details.get("descripcion"):
+                         logger.warning(f"Attempt {attempt}: Property description empty. Retrying...")
+                         await asyncio.sleep(5)
+                         continue
+                else:
+                    # Multi lot
+                    num_lotes = int(re.search(r'(\d+)', lotes_str).group(1))
+                    lots_data = []
+                    for i in range(1, num_lotes + 1):
+                        lot_url = self._get_lot_url(url, i)
+                        await StealthManager.human_delay(1000, 2000)
                         await self._safe_goto(lot_url)
+                        await self.page.wait_for_selector("table.tablaFormulario", timeout=10000)
                         lot_info = {"lote_numero": i}
                         lot_table = await self._extract_table_data()
                         lot_info.update(lot_table)
                         lot_info["tipologia"] = self._extract_tipologia(lot_table.get("bien", ""))
                         lots_data.append(lot_info)
-                        await StealthManager.human_delay(1000, 3000)
-                    except Exception:
-                        pass
-                details["lots_data"] = lots_data
+                    details["lots_data"] = lots_data
+
+                # If we reach here, we successfully extracted all stages
+                return details
+
+            except Exception as e:
+                logger.error(f"Attempt {attempt} failed for {url}: {e}")
+                if attempt == max_retries - 1:
+                    await self.log_diagnostic(f"final_fail_{details.get('identificador', 'unknown')}")
+                    return details
+                await asyncio.sleep(5)
 
         return details
 
@@ -282,23 +301,46 @@ class BOEScraper:
 
     async def _extract_table_data(self):
         data = {}
-        rows = await self.page.query_selector_all("tr")
-        for row in rows:
-            th = await row.query_selector("th")
-            td = await row.query_selector("td")
-            if th and td:
-                key = await th.inner_text()
-                value = await td.inner_text()
+        # Strategy: find all THs and their next siblings
+        ths = await self.page.query_selector_all("th")
+        for th in ths:
+            try:
+                key_raw = await th.inner_text()
+                if not key_raw: continue
+
+                # Get the value from the next sibling TD
+                value = await self.page.evaluate("(element) => element.nextElementSibling ? element.nextElementSibling.innerText : ''", th)
+
                 from unidecode import unidecode
-                clean_key = unidecode(key.strip().lower().replace(" ", "_").replace(":", "").replace("\n", ""))
+                clean_key = unidecode(key_raw.strip().lower().replace(" ", "_").replace(":", "").replace("\n", ""))
 
-                if "identificador" in clean_key: clean_key = "identificador"
-                if "codigo_postal" in clean_key: clean_key = "codigo_postal"
-                if "tasacion" in clean_key: clean_key = "tasacion"
-                if "puja_minima" in clean_key: clean_key = "puja_minima"
-                if "deposito" in clean_key: clean_key = "importe_del_deposito"
-                if "valor_subasta" in clean_key: clean_key = "valor_subasta"
-                if "cantidad_reclamada" in clean_key: clean_key = "cantidad_reclamada"
+                # Standardization mapping
+                mapping = {
+                    "identificador": "identificador",
+                    "codigo_postal": "codigo_postal",
+                    "tasacion": "tasacion",
+                    "puja_minima": "puja_minima",
+                    "deposito": "importe_del_deposito",
+                    "valor_subasta": "valor_subasta",
+                    "cantidad_reclamada": "cantidad_reclamada",
+                    "fecha_de_inicio": "fecha_de_inicio",
+                    "fecha_de_conclusion": "fecha_de_conclusion",
+                    "codigo": "codigo",
+                    "telefono": "telefono",
+                    "correo_electronico": "correo_electronico",
+                    "descripcion": "descripcion",
+                    "direccion": "direccion",
+                    "vivienda_habitual": "vivienda_habitual",
+                    "situacion_posesoria": "situacion_posesoria"
+                }
 
-                data[clean_key] = value.strip()
+                for k, v in mapping.items():
+                    if k in clean_key:
+                        clean_key = v
+                        break
+
+                if value:
+                    data[clean_key] = value.strip()
+            except Exception:
+                continue
         return data
