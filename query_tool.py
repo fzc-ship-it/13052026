@@ -37,6 +37,9 @@ def main():
     if len(results) > 10:
         print(f"... y {len(results) - 10} más.")
 
+    if not args.export and results:
+        print(f"\n[!] Sugerencia: Usa '--export excel' para generar un archivo Excel con todos los datos.")
+
     if args.export == "excel":
         filename = f"{args.output}.xlsx"
         if engine.export_to_excel(results, filename):
