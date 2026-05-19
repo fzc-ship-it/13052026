@@ -4,6 +4,7 @@ import re
 import os
 import random
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from unidecode import unidecode
 from playwright.async_api import async_playwright
 from src.stealth_manager import StealthManager
 
@@ -153,15 +154,17 @@ class BOEScraper:
         return auction_links
 
     async def has_next_page(self):
-        next_button = await self.page.query_selector("li.siguiente a")
+        # The BOE portal uses text 'siguiente' for pagination links
+        next_button = await self.page.query_selector("a:has-text('siguiente')")
         return next_button is not None
 
     async def go_to_next_page(self):
-        next_button = await self.page.query_selector("li.siguiente a")
+        next_button = await self.page.query_selector("a:has-text('siguiente')")
         if next_button:
+            logger.info("Navigating to next page of results...")
             await next_button.click()
             await self.page.wait_for_load_state("domcontentloaded")
-            await StealthManager.human_delay(1000, 2000)
+            await StealthManager.human_delay(1000, 2500)
 
     async def scan_all_ids(self, status):
         all_data = {}
@@ -308,7 +311,6 @@ class BOEScraper:
 
                     value = await self.page.evaluate("(element) => element.nextElementSibling ? element.nextElementSibling.innerText : ''", th)
 
-                    from unidecode import unidecode
                     clean_key = unidecode(key_raw.strip().lower().replace(" ", "_").replace(":", "").replace("\n", ""))
 
                     mapping = {
@@ -320,7 +322,6 @@ class BOEScraper:
                         "valor_subasta": "valor_subasta",
                         "cantidad_reclamada": "cantidad_reclamada",
                         "fecha_de_inicio": "fecha_de_inicio",
-                        "fecha_de_conclusion": "fecha_de_conclusion",
                         "fecha_de_conclusion": "fecha_de_conclusion",
                         "inicio_de_la_subasta": "fecha_de_inicio",
                         "conclusion_de_la_subasta": "fecha_de_conclusion",
