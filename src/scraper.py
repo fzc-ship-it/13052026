@@ -253,10 +253,19 @@ class BOEScraper:
                         await StealthManager.human_delay(800, 1500)
                         await self._safe_goto(lot_url, wait_until="domcontentloaded")
                         await self.page.wait_for_selector(data_selector, timeout=10000)
+
+                        lot_header = await self.page.query_selector("h4")
+                        lot_header_text = await lot_header.inner_text() if lot_header else ""
+
                         lot_table = await self._extract_table_data()
                         lot_info = {"lote_numero": i}
                         lot_info.update(lot_table)
-                        lot_info["tipologia"] = self._extract_tipologia(lot_table.get("bien", ""))
+
+                        # Ensure 'bien' is captured from the H4 header if not in table
+                        if not lot_info.get("bien"):
+                            lot_info["bien"] = lot_header_text
+
+                        lot_info["tipologia"] = self._extract_tipologia(lot_info.get("bien", ""))
                         lots_data.append(lot_info)
                     current_attempt_data["lots_data"] = lots_data
 
@@ -278,10 +287,6 @@ class BOEScraper:
 
         return details
 
-    def _extract_tipologia(self, bien_text):
-        if not bien_text: return ""
-        match = re.search(r'\(([^)]+)\)', bien_text)
-        return match.group(1).strip() if match else ""
 
     def _get_tab_url(self, base_url, ver_value):
         parsed = urlparse(base_url)
@@ -331,7 +336,10 @@ class BOEScraper:
                         "descripcion": "descripcion",
                         "direccion": "direccion",
                         "vivienda_habitual": "vivienda_habitual",
-                        "situacion_posesoria": "situacion_posesoria"
+                        "situacion_posesoria": "situacion_posesoria",
+                        "bien": "bien",
+                        "tipo_de_bien": "bien",
+                        "clase_de_bien": "bien"
                     }
 
                     for k, v in mapping.items():
@@ -346,3 +354,19 @@ class BOEScraper:
         except Exception:
             pass
         return data
+
+    def _extract_tipologia(self, bien_text):
+        if not bien_text: return ""
+        # Common pattern: "Inmueble (Vivienda)" -> "Vivienda"
+        match = re.search(r'\(([^)]+)\)', bien_text)
+        if match:
+            return match.group(1).strip()
+
+        # Fallback for patterns like "Bien 1 - Inmueble Vivienda" or just "Vivienda"
+        # If there are no parens, we take everything after the last "-" or just the whole string if short
+        if " - " in bien_text:
+            parts = bien_text.split(" - ")
+            candidate = parts[-1].strip()
+            return candidate
+
+        return bien_text.strip()
