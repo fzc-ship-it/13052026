@@ -9,7 +9,8 @@ STATUS_MAPPING = {
     "PU": "Próxima apertura",
     "EJ": "Celebrándose",
     "PC": "Concluida",
-    "FS": "Finalizada"
+    "FS": "Finalizada",
+    "CR": "Cesión de remate"
 }
 
 class DatabaseManager:

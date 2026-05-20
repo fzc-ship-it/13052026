@@ -269,9 +269,11 @@ class BOEScraper:
                         lots_data.append(lot_info)
                     current_attempt_data["lots_data"] = lots_data
 
-                # FINAL VALIDATION: Check if we have the critical data
-                # We are flexible with some fields like email if not present, but
-                # description and dates are mandatory for a "complete" record.
+                # NEW: Check for bids if the auction is concluded to classify "Cesión de remate"
+                # We do this check only if specifically requested or if it's already concluded
+                # (For performance, we don't always check Tab 4)
+
+                # FINAL VALIDATION
                 if current_attempt_data.get("descripcion") or (has_lotes and current_attempt_data.get("lots_data")):
                     return current_attempt_data
                 else:
@@ -303,6 +305,31 @@ class BOEScraper:
         query['idLote'] = [str(lot_index)]
         new_query = urlencode(query, doseq=True)
         return urlunparse(parsed._replace(query=new_query))
+
+    async def check_no_bids(self, url):
+        """Navigates to Pujas tab and returns True if no bids were found."""
+        pujas_url = self._get_tab_url(url, "4")
+        logger.info(f"Checking bids for classification: {pujas_url}")
+        await self._safe_goto(pujas_url, wait_until="domcontentloaded")
+        content = await self.page.content()
+        # Common text when no bids exist
+        no_bids_indicators = [
+            "No existen pujas",
+            "No se han realizado pujas",
+            "No hay pujas para esta subasta",
+            "No se han encontrado pujas"
+        ]
+        return any(indicator in content for indicator in no_bids_indicators)
+
+    async def get_portal_status_text(self, url):
+        """Extracts the exact status text from the identification page."""
+        await self._safe_goto(url, wait_until="domcontentloaded")
+        status_elem = await self.page.query_selector("p:has-text('Estado:')")
+        if status_elem:
+            text = await status_elem.inner_text()
+            # Format usually "Estado: Concluida - [Fecha...]" or "Estado: Concluida por el portal"
+            return text.replace("Estado:", "").split("-")[0].strip()
+        return ""
 
     async def _extract_table_data(self):
         data = {}

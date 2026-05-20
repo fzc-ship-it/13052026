@@ -12,6 +12,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+async def handle_concluded_classification(scraper, db, ident, url):
+    """Checks if a concluded auction should be 'Cesión de remate'."""
+    try:
+        portal_status = await scraper.get_portal_status_text(url)
+        if "portal" in portal_status.lower():
+            # Concluida por el portal - stays as PC
+            db.update_auction_status(ident, "PC")
+            logger.info(f"Auction {ident} concluded by portal.")
+        else:
+            no_bids = await scraper.check_no_bids(url)
+            if no_bids:
+                db.update_auction_status(ident, "CR") # Cesión de remate
+                logger.info(f"Auction {ident} classified as Cesión de Remate (no bids).")
+            else:
+                db.update_auction_status(ident, "PC")
+                logger.info(f"Auction {ident} concluded with bids.")
+    except Exception as e:
+        logger.error(f"Error classifying concluded auction {ident}: {e}")
+        db.update_auction_status(ident, "PC")
+
 async def run_sync(headless=True, days=0):
     db = DatabaseManager()
     scraper = BOEScraper(headless=headless)
@@ -56,14 +76,16 @@ async def run_sync(headless=True, days=0):
                 logger.info(f"Transitioning {ident}: Upcoming -> Active")
                 db.update_auction_status(ident, "EJ")
             elif ident not in upcoming_scan and ident not in active_scan:
-                logger.info(f"Marking {ident} as Concluded (disappeared from lists)")
-                db.update_auction_status(ident, "PC")
+                logger.info(f"Transitioning {ident}: Upcoming -> Concluded (Checking Remate)")
+                url = local_upcoming[ident]
+                await handle_concluded_classification(scraper, db, ident, url)
 
         # Transition: Local Active -> Concluded
         for ident in local_active:
             if ident not in active_scan:
-                logger.info(f"Transitioning {ident}: Active -> Concluded")
-                db.update_auction_status(ident, "PC")
+                logger.info(f"Transitioning {ident}: Active -> Concluded (Checking Remate)")
+                url = local_active[ident]
+                await handle_concluded_classification(scraper, db, ident, url)
 
         # 3. HISTORICAL PHASE (Optional)
         if days > 0:
@@ -82,8 +104,12 @@ async def run_sync(headless=True, days=0):
                 await scraper.perform_search()
                 hist_scan = await scraper.scan_all_ids(hist_status)
                 for ident, url in hist_scan.items():
-                    if ident not in portal_data:
+                    if not db.auction_exists(ident):
                         portal_data[ident] = {"url": url, "status": hist_status}
+                    else:
+                        # If exists, we might still want to check if it's "Cesión de remate"
+                        # Only if it's currently listed as PC/FS in DB
+                        pass
 
         # 4. DATA INTEGRITY PHASE: Identify incomplete records
         logger.info("--- STEP 5: Checking for incomplete records in DB ---")
@@ -109,8 +135,16 @@ async def run_sync(headless=True, days=0):
 
                 details = await scraper.extract_auction_details(url)
                 if details.get("identificador"):
+                    # If scraping a NEW concluded auction, check for Remate classification
+                    if status_info in ["PC", "FS"]:
+                        portal_status = await scraper.get_portal_status_text(url)
+                        if "portal" not in portal_status.lower():
+                            no_bids = await scraper.check_no_bids(url)
+                            if no_bids:
+                                status_info = "CR"
+
                     db.save_full_auction(details, status_info)
-                    logger.info(f"Successfully processed auction {ident}")
+                    logger.info(f"Successfully processed auction {ident} as {status_info}")
                     processed_count += 1
                 else:
                     logger.warning(f"Skipping auction {ident}: Failed to extract minimal identity data.")
