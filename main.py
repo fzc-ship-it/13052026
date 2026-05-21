@@ -107,9 +107,11 @@ async def run_sync(headless=True, days=0):
                     if not db.auction_exists(ident):
                         portal_data[ident] = {"url": url, "status": hist_status}
                     else:
-                        # If exists, we might still want to check if it's "Cesión de remate"
-                        # Only if it's currently listed as PC/FS in DB
-                        pass
+                        # Re-evaluate recently concluded auctions if they are not yet Remate
+                        local_status = next((a['estado_proceso'] for a in db.get_auctions_by_status(["Concluida", "Finalizada"]) if a['identificador'] == ident), None)
+                        if local_status:
+                            logger.info(f"Re-evaluating historical auction {ident} for Remate classification")
+                            await handle_concluded_classification(scraper, db, ident, url)
 
         # 4. DATA INTEGRITY PHASE: Identify incomplete records
         logger.info("--- STEP 5: Checking for incomplete records in DB ---")
@@ -118,7 +120,11 @@ async def run_sync(headless=True, days=0):
 
         # 5. EXTRACTION PHASE: Scrape details only for new or incomplete IDs
         incomplete_ids = {a['identificador'] for a in incomplete}
-        to_process_ids = [ident for ident in portal_data if not db.auction_exists(ident) or ident in incomplete_ids]
+
+        # We process:
+        # 1. New auctions found in portal scan
+        # 2. Auctions we know are incomplete
+        to_process_ids = list(set([ident for ident in portal_data if not db.auction_exists(ident)] + list(incomplete_ids)))
 
         logger.info(f"--- STEP 6: Deep Scraping {len(to_process_ids)} auctions ---")
 

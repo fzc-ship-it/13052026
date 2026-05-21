@@ -91,16 +91,16 @@ class DatabaseManager:
             return [dict(row) for row in cursor.fetchall()]
 
     def get_incomplete_auctions(self):
-        """Identifies auctions with missing critical fields."""
+        """Identifies auctions with missing critical fields or no lot data."""
         query = """
             SELECT a.identificador, a.url
             FROM auctions a
-            JOIN lots l ON a.identificador = l.auction_id
-            WHERE a.fecha_inicio IS NULL OR a.fecha_inicio = ''
+            LEFT JOIN lots l ON a.identificador = l.auction_id
+            WHERE l.id IS NULL
+               OR a.fecha_inicio IS NULL OR a.fecha_inicio = ''
                OR a.fecha_conclusion IS NULL OR a.fecha_conclusion = ''
                OR a.autoridad_gestora_codigo IS NULL OR a.autoridad_gestora_codigo = ''
                OR l.bien_descripcion IS NULL OR l.bien_descripcion = ''
-               OR (a.tiene_lotes = 0 AND (l.valor_subasta = 0 OR l.valor_subasta IS NULL))
         """
         with sqlite3.connect(self.db_name) as conn:
             conn.row_factory = sqlite3.Row

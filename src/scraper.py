@@ -308,28 +308,73 @@ class BOEScraper:
 
     async def check_no_bids(self, url):
         """Navigates to Pujas tab and returns True if no bids were found."""
-        pujas_url = self._get_tab_url(url, "4")
+        # Ensure we are on the base page to find the tab
+        await self._safe_goto(url, wait_until="domcontentloaded")
+
+        # Try to find the 'Pujas' tab link
+        pujas_tab = await self.page.query_selector("a:has-text('Pujas')")
+        pujas_url = None
+        if pujas_tab:
+            pujas_url = await pujas_tab.get_attribute("href")
+            if pujas_url and not pujas_url.startswith("http"):
+                pujas_url = self.BASE_URL + pujas_url.lstrip("./")
+
+        # Fallback to standard tab IDs if not found
+        if not pujas_url:
+            for v in ["5", "4"]:
+                test_url = self._get_tab_url(url, v)
+                await self._safe_goto(test_url, wait_until="domcontentloaded")
+                body_text = await self.page.inner_text("body")
+                if "Pujas" in body_text:
+                    pujas_url = test_url
+                    break
+
+        if not pujas_url:
+            logger.warning(f"Could not find Pujas tab for {url}")
+            return False
+
         logger.info(f"Checking bids for classification: {pujas_url}")
-        await self._safe_goto(pujas_url, wait_until="domcontentloaded")
-        content = await self.page.content()
-        # Common text when no bids exist
+        if self.page.url != pujas_url:
+            await self._safe_goto(pujas_url, wait_until="domcontentloaded")
+
+        text = await self.page.inner_text("body")
+        text_up = text.upper()
+
+        # Explicit no-bids text
         no_bids_indicators = [
-            "No existen pujas",
-            "No se han realizado pujas",
-            "No hay pujas para esta subasta",
-            "No se han encontrado pujas"
+            "NO EXISTEN PUJAS",
+            "NO SE HAN REALIZADO PUJAS",
+            "NO HAY PUJAS",
+            "NO SE HAN ENCONTRADO PUJAS"
         ]
-        return any(indicator in content for indicator in no_bids_indicators)
+
+        if any(indicator in text_up for indicator in no_bids_indicators):
+            return True
+
+        # Check for bid table headers.
+        if "IMPORTE DE LA PUJA" in text_up or "FECHA DE LA PUJA" in text_up:
+            return False
+
+        # If no indicators and no bid headers, check if there's any table in the data block
+        data_block = await self.page.query_selector("#idBloqueDatos1 table")
+        return data_block is None
 
     async def get_portal_status_text(self, url):
-        """Extracts the exact status text from the identification page."""
+        """Extracts the exact status text from the identification page notices."""
         await self._safe_goto(url, wait_until="domcontentloaded")
-        status_elem = await self.page.query_selector("p:has-text('Estado:')")
-        if status_elem:
-            text = await status_elem.inner_text()
-            # Format usually "Estado: Concluida - [Fecha...]" or "Estado: Concluida por el portal"
-            return text.replace("Estado:", "").split("-")[0].strip()
-        return ""
+
+        # Look specifically in notice boxes (#contenido .aviso)
+        # We avoid checking the whole body to prevent false positives from headers
+        notices = await self.page.query_selector_all("#contenido .aviso")
+        for notice in notices:
+            text = await notice.inner_text()
+            text_up = text.upper()
+            if "CONCLUIDO POR EL PORTAL" in text_up or "CERRADA POR EL PORTAL" in text_up:
+                return "Concluida por el portal"
+            if "CANCELADA" in text_up or "SUSPENDIDA" in text_up:
+                return "Suspendida"
+
+        return "Concluida"
 
     async def _extract_table_data(self):
         data = {}
