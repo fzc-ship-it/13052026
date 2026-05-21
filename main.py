@@ -36,14 +36,15 @@ async def run_sync(headless=True, days=0):
     db = DatabaseManager()
     scraper = BOEScraper(headless=headless)
 
+    stats = {"new": 0, "transitions": 0, "re_evaluated": 0}
+
     try:
-        logger.info("Starting synchronization engine...")
+        logger.info("Starting INCREMENTAL synchronization engine...")
         await scraper.start()
 
-        # 1. SCAN PHASE: Get all current IDs for Upcoming and Active
-        portal_data = {} # {id: {"url": url, "status": status}}
+        # 1. SCAN PHASE: Quick scan of IDs currently on the portal
+        portal_data = {}
 
-        # Scan Upcoming (PU) - Global search
         logger.info("--- STEP 1: Scanning UPCOMING auctions (Global) ---")
         await scraper.navigate_to_search()
         await scraper.select_property_type()
@@ -53,7 +54,6 @@ async def run_sync(headless=True, days=0):
         for ident, url in upcoming_scan.items():
             portal_data[ident] = {"url": url, "status": "PU"}
 
-        # Scan Active (EJ) - Global search
         logger.info("--- STEP 2: Scanning ACTIVE auctions (Global) ---")
         await scraper.navigate_to_search()
         await scraper.select_property_type()
@@ -63,37 +63,42 @@ async def run_sync(headless=True, days=0):
         for ident, url in active_scan.items():
             portal_data[ident] = {"url": url, "status": "EJ"}
 
-        # 2. TRANSITION PHASE: Compare with local DB
-        logger.info("--- STEP 3: Handling transitions ---")
+        # 2. TRANSITION PHASE: Detect status changes for local records
+        logger.info("--- STEP 3: Handling transitions and conclusions ---")
 
-        # Get all local Upcoming/Active from DB
         local_upcoming = {a['identificador']: a['url'] for a in db.get_auctions_by_status(["Próxima apertura"])}
         local_active = {a['identificador']: a['url'] for a in db.get_auctions_by_status(["Celebrándose"])}
 
-        # Transition: Local Upcoming -> Active or Concluded
+        # Transition: Upcoming -> Active
         for ident in local_upcoming:
             if ident in active_scan:
-                logger.info(f"Transitioning {ident}: Upcoming -> Active")
+                logger.info(f"Transition: {ident} is now ACTIVE")
                 db.update_auction_status(ident, "EJ")
+                stats["transitions"] += 1
             elif ident not in upcoming_scan and ident not in active_scan:
-                logger.info(f"Transitioning {ident}: Upcoming -> Concluded (Checking Remate)")
+                logger.info(f"Transition: {ident} DISAPPEARED from upcoming/active lists")
                 url = local_upcoming[ident]
                 await handle_concluded_classification(scraper, db, ident, url)
+                stats["transitions"] += 1
 
-        # Transition: Local Active -> Concluded
+        # Transition: Active -> Concluded
         for ident in local_active:
             if ident not in active_scan:
-                logger.info(f"Transitioning {ident}: Active -> Concluded (Checking Remate)")
+                logger.info(f"Transition: {ident} is now CONCLUDED")
                 url = local_active[ident]
                 await handle_concluded_classification(scraper, db, ident, url)
+                stats["transitions"] += 1
 
-        # 3. HISTORICAL PHASE (Optional)
+        # 3. HISTORICAL PHASE (Optional): Fetch recently closed auctions
         if days > 0:
             from datetime import datetime, timedelta
             today = datetime.now()
             start_date = today - timedelta(days=days)
             date_str = start_date.strftime("%Y-%m-%d")
             today_str = today.strftime("%Y-%m-%d")
+
+            # Pre-fetch candidates for re-evaluation to avoid N+1 queries in loop
+            local_concluded_ids = {a['identificador'] for a in db.get_auctions_by_status(["Concluida", "Finalizada"])}
 
             for hist_status in ["PC", "FS"]:
                 logger.info(f"--- STEP 4: Scanning HISTORICAL {hist_status} auctions ({days} days) ---")
@@ -103,15 +108,14 @@ async def run_sync(headless=True, days=0):
                 await scraper.set_date_range("fin", date_str, today_str)
                 await scraper.perform_search()
                 hist_scan = await scraper.scan_all_ids(hist_status)
+
                 for ident, url in hist_scan.items():
                     if not db.auction_exists(ident):
                         portal_data[ident] = {"url": url, "status": hist_status}
-                    else:
-                        # Re-evaluate recently concluded auctions if they are not yet Remate
-                        local_status = next((a['estado_proceso'] for a in db.get_auctions_by_status(["Concluida", "Finalizada"]) if a['identificador'] == ident), None)
-                        if local_status:
-                            logger.info(f"Re-evaluating historical auction {ident} for Remate classification")
-                            await handle_concluded_classification(scraper, db, ident, url)
+                    elif ident in local_concluded_ids:
+                        logger.info(f"Re-evaluating historical auction {ident} for Remate classification")
+                        await handle_concluded_classification(scraper, db, ident, url)
+                        stats["re_evaluated"] += 1
 
         # 4. DATA INTEGRITY PHASE: Identify incomplete records
         logger.info("--- STEP 5: Checking for incomplete records in DB ---")
@@ -161,7 +165,11 @@ async def run_sync(headless=True, days=0):
             except Exception as e:
                 logger.error(f"Error processing auction {ident}: {e}")
 
-        logger.info(f"SYNC COMPLETED. Total processed: {processed_count}")
+        logger.info(f"SYNC COMPLETED.")
+        logger.info(f"SUMMARY:")
+        logger.info(f" - New auctions scraped: {processed_count}")
+        logger.info(f" - Status transitions handled: {stats['transitions']}")
+        logger.info(f" - Historical re-evaluations: {stats['re_evaluated']}")
 
     except Exception as e:
         logger.critical(f"Sync failed due to critical error: {e}")

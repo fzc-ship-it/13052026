@@ -7,6 +7,7 @@ def main():
     parser = argparse.ArgumentParser(description="Herramienta de consulta de subastas BOE")
     parser.add_argument("--db", default="boe_auctions.db", help="Ruta a la base de datos SQLite")
     parser.add_argument("--provincia", help="Filtrar por nombre de provincia")
+    parser.add_argument("--status", help="Filtrar por estado (ej: 'Cesión de remate', 'Celebrándose')")
     parser.add_argument("--min-price", type=float, help="Precio mínimo")
     parser.add_argument("--max-price", type=float, help="Precio máximo")
     parser.add_argument("--cp", help="Código postal exacto")
@@ -20,6 +21,7 @@ def main():
 
     filters = {}
     if args.provincia: filters["provincia"] = args.provincia
+    if args.status: filters["estado_proceso"] = args.status
     if args.min_price: filters["min_price"] = args.min_price
     if args.max_price: filters["max_price"] = args.max_price
     if args.cp: filters["cp"] = args.cp

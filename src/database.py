@@ -231,6 +231,9 @@ class DatabaseManager:
             if filters.get("provincia"):
                 query += " AND l.bien_provincia LIKE ?"
                 params.append(f"%{filters['provincia']}%")
+            if filters.get("estado_proceso"):
+                query += " AND a.estado_proceso LIKE ?"
+                params.append(f"%{filters['estado_proceso']}%")
             if filters.get("min_price"):
                 query += " AND l.valor_subasta >= ?"
                 params.append(filters["min_price"])
