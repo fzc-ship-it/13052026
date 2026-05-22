@@ -356,21 +356,27 @@ class BOEScraper:
             return False
 
         # If no indicators and no bid headers, check if there's any table in the data block
-        data_block = await self.page.query_selector("#idBloqueDatos1 table")
-        return data_block is None
+        # If table exists, check if it has more than just the header row
+        table = await self.page.query_selector("#idBloqueDatos1 table, table.tablaFormulario")
+        if not table:
+            return True
+
+        rows = await table.query_selector_all("tr")
+        # If only 1 row, it's likely just a header or empty
+        return len(rows) <= 1
 
     async def get_portal_status_text(self, url):
         """Extracts the exact status text from the identification page notices."""
         await self._safe_goto(url, wait_until="domcontentloaded")
 
-        # Look specifically in notice boxes (#contenido .aviso)
-        # We avoid checking the whole body to prevent false positives from headers
         notices = await self.page.query_selector_all("#contenido .aviso")
         for notice in notices:
             text = await notice.inner_text()
             text_up = text.upper()
             if "CONCLUIDO POR EL PORTAL" in text_up or "CERRADA POR EL PORTAL" in text_up:
                 return "Concluida por el portal"
+            if "FINALIZADA" in text_up:
+                return "Finalizada"
             if "CANCELADA" in text_up or "SUSPENDIDA" in text_up:
                 return "Suspendida"
 

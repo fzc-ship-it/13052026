@@ -29,6 +29,15 @@ def main():
     results = engine.search_auctions(**filters)
 
     print(f"\n--- Resultados de la búsqueda ({len(results)} encontrados) ---")
+
+    if not results:
+        print("\n[!] No se encontraron resultados con los filtros aplicados.")
+        counts = db.get_status_counts()
+        if counts:
+            print("\nEstados disponibles en la base de datos:")
+            for status, count in counts.items():
+                print(f" - {status}: {count}")
+
     for r in results[:10]: # Show first 10
         # Adapt keys for preview display
         id_val = r.get('identificador', r.get('auction_id', 'N/A'))

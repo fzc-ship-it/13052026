@@ -249,3 +249,12 @@ class DatabaseManager:
             cursor = conn.cursor()
             cursor.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
+
+    def get_status_counts(self):
+        """Returns a summary of how many auctions are in each status."""
+        query = "SELECT estado_proceso, COUNT(*) as count FROM auctions GROUP BY estado_proceso"
+        with sqlite3.connect(self.db_name) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(query)
+            return {row['estado_proceso']: row['count'] for row in cursor.fetchall()}
