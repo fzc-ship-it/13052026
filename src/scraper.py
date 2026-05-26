@@ -142,16 +142,31 @@ class BOEScraper:
         await self.page.wait_for_load_state("domcontentloaded")
         await StealthManager.human_delay(1000, 2500)
 
-    async def get_auction_links(self):
-        links = await self.page.query_selector_all("a.resultado-busqueda-link-defecto")
-        auction_links = []
-        for link in links:
-            href = await link.get_attribute("href")
-            if href:
-                if not href.startswith("http"):
-                    href = self.BASE_URL + href.lstrip("./")
-                auction_links.append(href)
-        return auction_links
+    async def get_auction_results(self):
+        """Captures URL and current status text from the search result list."""
+        results = {}
+        items = await self.page.query_selector_all("li.resultado-busqueda")
+        for item in items:
+            link_elem = await item.query_selector("a.resultado-busqueda-link-defecto")
+            status_elem = await item.query_selector("p:has-text('Estado:')")
+
+            if link_elem:
+                href = await link_elem.get_attribute("href")
+                if href:
+                    if not href.startswith("http"):
+                        href = self.BASE_URL + href.lstrip("./")
+
+                    match = re.search(r'idSub=([^&]+)', href)
+                    if match:
+                        ident = match.group(1)
+                        status_text = ""
+                        if status_elem:
+                            raw_status = await status_elem.inner_text()
+                            # e.g., "Estado: Celebrándose - [Conclusión...]"
+                            status_text = raw_status.replace("Estado:", "").split("-")[0].strip()
+
+                        results[ident] = {"url": href, "portal_status": status_text}
+        return results
 
     async def has_next_page(self):
         # The BOE portal uses text 'siguiente' for pagination links
@@ -166,21 +181,21 @@ class BOEScraper:
             await self.page.wait_for_load_state("domcontentloaded")
             await StealthManager.human_delay(1000, 2500)
 
-    async def scan_all_ids(self, status):
-        all_data = {}
-        logger.info(f"Scanning all IDs for status {status}...")
+    async def scan_all_results(self, status_code):
+        """Iterates pages and returns {ident: {url, portal_status, status_code}}."""
+        all_results = {}
+        logger.info(f"Scanning pages for status {status_code}...")
         while True:
-            links = await self.get_auction_links()
-            for link in links:
-                match = re.search(r'idSub=([^&]+)', link)
-                if match:
-                    all_data[match.group(1)] = link
+            page_results = await self.get_auction_results()
+            for ident, data in page_results.items():
+                data["status_code"] = status_code
+                all_results[ident] = data
 
             if await self.has_next_page():
                 await self.go_to_next_page()
             else:
                 break
-        return all_data
+        return all_results
 
     async def extract_auction_details(self, url):
         """Comprehensive extraction with strict verification of 13 key fields."""

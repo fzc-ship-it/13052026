@@ -50,18 +50,16 @@ async def run_sync(headless=True, days=0):
         await scraper.select_property_type()
         await scraper.select_auction_status("PU")
         await scraper.perform_search()
-        upcoming_scan = await scraper.scan_all_ids("PU")
-        for ident, url in upcoming_scan.items():
-            portal_data[ident] = {"url": url, "status": "PU"}
+        upcoming_scan = await scraper.scan_all_results("PU")
+        portal_data.update(upcoming_scan)
 
         logger.info("--- STEP 2: Scanning ACTIVE auctions (Global) ---")
         await scraper.navigate_to_search()
         await scraper.select_property_type()
         await scraper.select_auction_status("EJ")
         await scraper.perform_search()
-        active_scan = await scraper.scan_all_ids("EJ")
-        for ident, url in active_scan.items():
-            portal_data[ident] = {"url": url, "status": "EJ"}
+        active_scan = await scraper.scan_all_results("EJ")
+        portal_data.update(active_scan)
 
         # 2. TRANSITION PHASE: Detect status changes for local records
         logger.info("--- STEP 3: Handling transitions and conclusions ---")
@@ -75,8 +73,8 @@ async def run_sync(headless=True, days=0):
                 logger.info(f"Transition: {ident} is now ACTIVE")
                 db.update_auction_status(ident, "EJ")
                 stats["transitions"] += 1
-            elif ident not in upcoming_scan and ident not in active_scan:
-                logger.info(f"Transition: {ident} DISAPPEARED from upcoming/active lists")
+            elif ident not in portal_data:
+                logger.info(f"Transition: {ident} (UPCOMING) DISAPPEARED - Likely concluded or closed")
                 url = local_upcoming[ident]
                 await handle_concluded_classification(scraper, db, ident, url)
                 stats["transitions"] += 1
@@ -84,7 +82,7 @@ async def run_sync(headless=True, days=0):
         # Transition: Active -> Concluded
         for ident in local_active:
             if ident not in active_scan:
-                logger.info(f"Transition: {ident} is now CONCLUDED")
+                logger.info(f"Transition: {ident} (ACTIVE) is now CONCLUDED")
                 url = local_active[ident]
                 await handle_concluded_classification(scraper, db, ident, url)
                 stats["transitions"] += 1
@@ -107,14 +105,16 @@ async def run_sync(headless=True, days=0):
                 await scraper.select_auction_status(hist_status)
                 await scraper.set_date_range("fin", date_str, today_str)
                 await scraper.perform_search()
-                hist_scan = await scraper.scan_all_ids(hist_status)
+                hist_scan = await scraper.scan_all_results(hist_status)
 
-                for ident, url in hist_scan.items():
+                for ident, data in hist_scan.items():
                     if not db.auction_exists(ident):
-                        portal_data[ident] = {"url": url, "status": hist_status}
+                        portal_data[ident] = {"url": data["url"], "status": hist_status}
                     elif ident in local_concluded_ids:
+                        # Re-evaluate recently concluded auctions if they are not yet Remate
+                        # We only re-evaluate if they are on the portal list (meaning they just ended)
                         logger.info(f"Re-evaluating historical auction {ident} for Remate classification")
-                        await handle_concluded_classification(scraper, db, ident, url)
+                        await handle_concluded_classification(scraper, db, ident, data["url"])
                         stats["re_evaluated"] += 1
 
         # 4. DATA INTEGRITY PHASE: Identify incomplete records
@@ -135,13 +135,26 @@ async def run_sync(headless=True, days=0):
         processed_count = 0
         for ident in to_process_ids:
             try:
-                url = portal_data.get(ident, {}).get("url")
+                item = portal_data.get(ident, {})
+                url = item.get("url")
+
                 if not url:
+                    # Fallback for incomplete auctions not in current scan
                     url = next((a['url'] for a in incomplete if a['identificador'] == ident), None)
 
                 if not url: continue
 
-                status_info = portal_data.get(ident, {}).get("status", "EJ")
+                # Get status from current scan, or preserve local status if re-scraping incomplete
+                status_info = item.get("status_code")
+                if not status_info:
+                    # Try to get existing status from DB if it's just an incomplete record re-scrape
+                    local_info = next((a for a in db.get_auctions_by_status(["Próxima apertura", "Celebrándose", "Concluida", "Finalizada", "Cesión de remate"]) if a['identificador'] == ident), None)
+                    if local_info:
+                        # Map descriptive status back to code for save_full_auction
+                        rev_map = {v: k for k, v in db.STATUS_MAPPING.items()}
+                        status_info = rev_map.get(local_info["estado_proceso"], "EJ")
+                    else:
+                        status_info = "EJ"
 
                 details = await scraper.extract_auction_details(url)
                 if details.get("identificador"):
