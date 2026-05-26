@@ -112,10 +112,11 @@ async def run_sync(headless=True, days=0):
                         portal_data[ident] = {"url": data["url"], "status": hist_status}
                     elif ident in local_concluded_ids:
                         # Re-evaluate recently concluded auctions if they are not yet Remate
-                        # We only re-evaluate if they are on the portal list (meaning they just ended)
                         logger.info(f"Re-evaluating historical auction {ident} for Remate classification")
                         await handle_concluded_classification(scraper, db, ident, data["url"])
                         stats["re_evaluated"] += 1
+                        # Remove from local list to avoid double evaluation in same run if seen again
+                        local_concluded_ids.remove(ident)
 
         # 4. DATA INTEGRITY PHASE: Identify incomplete records
         logger.info("--- STEP 5: Checking for incomplete records in DB ---")
