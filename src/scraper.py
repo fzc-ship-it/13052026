@@ -1,0 +1,541 @@
+import asyncio
+import logging
+import re
+import os
+import random
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from unidecode import unidecode
+from playwright.async_api import async_playwright
+from src.stealth_manager import StealthManager
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class BOEScraper:
+    BASE_URL = "https://subastas.boe.es/"
+    SEARCH_URL = "https://subastas.boe.es/subastas_ava.php"
+
+    def __init__(self, headless=True):
+        self.headless = headless
+        self.browser = None
+        self.context = None
+        self.playwright = None
+        self.page = None
+
+    async def start(self):
+        self.playwright = await async_playwright().start()
+
+        # Absolute cleaning of previous sessions
+        StealthManager.clean_temp_data()
+
+        # Launch non-persistent browser for 100% fresh identity
+        self.browser = await self.playwright.chromium.launch(
+            headless=self.headless,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-infobars",
+                "--window-position=0,0",
+                "--ignore-certificate-errors",
+                "--disable-extensions"
+            ]
+        )
+
+        resolution = StealthManager.get_random_resolution()
+        self.context = await self.browser.new_context(
+            user_agent=StealthManager.get_random_user_agent(),
+            viewport=resolution,
+            locale="es-ES",
+            timezone_id="Europe/Madrid"
+        )
+
+        self.page = await self.context.new_page()
+        await StealthManager.apply_stealth(self.page)
+
+    async def stop(self):
+        if self.context:
+            await self.context.close()
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
+        StealthManager.clean_temp_data()
+
+    async def _safe_goto(self, url, wait_until="domcontentloaded"):
+        """Wrapper for goto with diagnostic logs and standardized domcontentloaded."""
+        try:
+            await self.page.goto(url, wait_until=wait_until, timeout=45000)
+            # Short randomized delay after load to look human
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+        except Exception as e:
+            logger.error(f"Failed to navigate to {url}: {e}")
+            await self.log_diagnostic(f"goto_fail_{int(asyncio.get_event_loop().time())}")
+            raise
+
+    async def log_diagnostic(self, name):
+        """Saves screenshot and HTML for debugging."""
+        log_dir = os.path.join(os.getcwd(), "logs")
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+
+        try:
+            screenshot_path = os.path.join(log_dir, f"{name}.png")
+            html_path = os.path.join(log_dir, f"{name}.html")
+            await self.page.screenshot(path=screenshot_path)
+            content = await self.page.content()
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info(f"Diagnostic logs saved: {screenshot_path}")
+        except Exception:
+            pass
+
+    async def navigate_to_search(self):
+        logger.info(f"Navigating to {self.SEARCH_URL}")
+        await self._safe_goto(self.SEARCH_URL)
+
+    async def get_provinces(self):
+        provinces = await self.page.query_selector_all("select[name='dato[8]'] option")
+        province_list = []
+        for p in provinces:
+            value = await p.get_attribute("value")
+            text = await p.inner_text()
+            if value and value != "":
+                province_list.append({"value": value, "name": text.strip()})
+        return province_list
+
+    async def select_province(self, province_value):
+        await self.page.select_option("select[name='dato[8]']", province_value)
+        await StealthManager.human_delay(500, 1500)
+
+    async def select_property_type(self):
+        selector = "input[name='dato[3]'][value='I']"
+        await self.page.locator(selector).scroll_into_view_if_needed()
+        await self.page.click(selector, force=True)
+        await StealthManager.human_delay(500, 1500)
+
+    async def select_auction_status(self, status):
+        logger.info(f"Selecting status: {status}")
+        selector = f"input[name='dato[2]'][value='{status}']"
+        await self.page.locator(selector).scroll_into_view_if_needed()
+        await self.page.click(selector, force=True)
+        await StealthManager.human_delay(500, 1500)
+
+    async def set_date_range(self, date_type, start_date, end_date):
+        field_idx = "18" if date_type == "inicio" else "17"
+        logger.info(f"Setting {date_type} date range: {start_date} to {end_date}")
+
+        d1 = start_date.split("-")
+        d1_fmt = f"{d1[2]}{d1[1]}{d1[0]}" # DDMMYYYY
+        d2 = end_date.split("-")
+        d2_fmt = f"{d2[2]}{d2[1]}{d2[0]}" # DDMMYYYY
+
+        await self.page.focus(f"input[name='dato[{field_idx}][0]']")
+        await self.page.keyboard.type(d1_fmt, delay=random.randint(40, 100))
+        await self.page.focus(f"input[name='dato[{field_idx}][1]']")
+        await self.page.keyboard.type(d2_fmt, delay=random.randint(40, 100))
+        await StealthManager.human_delay(800, 1800)
+
+    async def perform_search(self):
+        logger.info("Performing search...")
+        await self.page.click("input[name='accion'][value='Buscar']")
+        await self.page.wait_for_load_state("domcontentloaded")
+        await StealthManager.human_delay(1000, 2500)
+
+    async def get_total_results_count(self):
+        """Parses the total count of results from the 'Resultados 1 a 50 de X' text."""
+        try:
+            elem = await self.page.query_selector(".paginar p")
+            if elem:
+                text = await elem.inner_text()
+                # Pattern: "Resultados 1 a 50 de 1.119"
+                match = re.search(r'de\s+([\d\.]+)', text)
+                if match:
+                    return int(match.group(1).replace(".", ""))
+        except Exception as e:
+            logger.warning(f"Could not parse total results count: {e}")
+        return 0
+
+    async def get_auction_results(self):
+        """Captures URL and current status text from the search result list."""
+        # Ensure at least some results are loaded
+        try:
+            await self.page.wait_for_selector("li.resultado-busqueda", timeout=10000)
+        except Exception:
+            return {}
+
+        results = {}
+        items = await self.page.query_selector_all("li.resultado-busqueda")
+        for item in items:
+            link_elem = await item.query_selector("a.resultado-busqueda-link-defecto")
+            status_elem = await item.query_selector("p:has-text('Estado:')")
+
+            if link_elem:
+                href = await link_elem.get_attribute("href")
+                if href:
+                    if not href.startswith("http"):
+                        href = self.BASE_URL + href.lstrip("./")
+
+                    match = re.search(r'idSub=([^&]+)', href)
+                    if match:
+                        ident = match.group(1)
+                        status_text = ""
+                        if status_elem:
+                            raw_status = await status_elem.inner_text()
+                            # e.g., "Estado: Celebrándose - [Conclusión...]"
+                            status_text = raw_status.replace("Estado:", "").split("-")[0].strip()
+
+                        results[ident] = {"url": href, "portal_status": status_text}
+        return results
+
+    async def get_pagination_info(self):
+        """Returns (current_start, current_end, total_count) from pagination text."""
+        try:
+            elem = await self.page.query_selector(".paginar p")
+            if elem:
+                text = await elem.inner_text()
+                # Pattern: "Resultados 1 a 50 de 1.119"
+                match = re.search(r'Resultados\s+([\d\.]+)\s+a\s+([\d\.]+)\s+de\s+([\d\.]+)', text)
+                if match:
+                    start = int(match.group(1).replace(".", ""))
+                    end = int(match.group(2).replace(".", ""))
+                    total = int(match.group(3).replace(".", ""))
+                    return start, end, total
+        except Exception:
+            pass
+        return 0, 0, 0
+
+    async def has_next_page(self):
+        _, end, total = await self.get_pagination_info()
+        if total > 0 and end < total:
+            # Also check if the button exists just in case
+            btn = await self.page.query_selector("a:has-text('siguiente')")
+            return btn is not None
+        return False
+
+    async def go_to_next_page(self):
+        next_button = await self.page.query_selector("a:has-text('siguiente')")
+        if next_button:
+            _, end, _ = await self.get_pagination_info()
+            logger.info(f"Navigating to next page (starting from {end + 1})...")
+            await next_button.click()
+            # Wait for the specific page markers to change to ensure load
+            try:
+                await self.page.wait_for_function(
+                    f"() => {{ const p = document.querySelector('.paginar p'); return p && !p.innerText.includes(' {end} '); }}",
+                    timeout=15000
+                )
+            except Exception:
+                await self.page.wait_for_load_state("domcontentloaded")
+            await StealthManager.human_delay(1000, 2500)
+
+    async def scan_all_results(self, status_code):
+        """Iterates pages and returns ({results}, is_complete)."""
+        all_results = {}
+        expected_total = await self.get_total_results_count()
+        logger.info(f"Scanning pages for status {status_code} (Expected: {expected_total})...")
+
+        consecutive_empty_pages = 0
+        while True:
+            page_results = await self.get_auction_results()
+
+            if not page_results and expected_total > len(all_results):
+                consecutive_empty_pages += 1
+                if consecutive_empty_pages <= 2:
+                    logger.warning(f"Empty page detected. Retry {consecutive_empty_pages}/2...")
+                    await asyncio.sleep(5)
+                    await self.page.reload(wait_until="domcontentloaded")
+                    continue
+                else:
+                    logger.error("Consecutive empty pages. Stopping scan to prevent data corruption.")
+                    break
+
+            consecutive_empty_pages = 0
+
+            for ident, data in page_results.items():
+                data["status_code"] = status_code
+                all_results[ident] = data
+
+            if await self.has_next_page():
+                await self.go_to_next_page()
+            else:
+                break
+
+        is_complete = True
+        if expected_total > 0:
+            found_count = len(all_results)
+            # Allow minor discrepancy (e.g. 1-2 items) but not massive
+            if found_count < (expected_total * 0.95):
+                logger.error(f"Scan incomplete for {status_code}: Found {found_count}/{expected_total}")
+                is_complete = False
+            else:
+                logger.info(f"Scan verified for {status_code}: Found {found_count}/{expected_total}")
+
+        return all_results, is_complete
+
+    async def extract_auction_details(self, url):
+        """Comprehensive extraction with strict verification of 13 key fields."""
+        logger.info(f"Extracting full details from {url}")
+
+        max_retries = 3
+        details = {"url": url}
+
+        # Verification requirements for the 13 critical fields
+        # Note: 'autoridad_gestora_codigo' is mapped as 'codigo' in extraction
+        critical_fields = [
+            "identificador", "fecha_de_inicio", "fecha_de_conclusion",
+            "tasacion", "puja_minima", "importe_del_deposito", "cantidad_reclamada",
+            "codigo", "telefono", "correo_electronico",
+            "descripcion", "direccion"
+        ]
+
+        data_selector = "div#idBloqueDatos1 table, table.tablaFormulario, table"
+
+        for attempt in range(max_retries):
+            try:
+                # Reset details for this attempt
+                current_attempt_data = {"url": url}
+
+                # Tab 1: Información General
+                await self._safe_goto(url, wait_until="domcontentloaded")
+                await self.page.wait_for_selector(data_selector, timeout=15000)
+                tab1_data = await self._extract_table_data()
+                current_attempt_data.update(tab1_data)
+
+                # Verify Tab 1 critical fields
+                t1_critical = ["identificador", "fecha_de_inicio", "fecha_de_conclusion", "valor_subasta"]
+                if not any(current_attempt_data.get(f) for f in t1_critical):
+                    logger.warning(f"Tab 1 empty on attempt {attempt}. Retrying...")
+                    await asyncio.sleep(2)
+                    continue
+
+                # Tab 2: Autoridad Gestora
+                await StealthManager.human_delay(1200, 2500)
+                await self._safe_goto(self._get_tab_url(url, "2"), wait_until="domcontentloaded")
+                await self.page.wait_for_selector(data_selector, timeout=10000)
+                current_attempt_data.update(await self._extract_table_data())
+
+                # Tab 3: Bienes / Lotes
+                await StealthManager.human_delay(1200, 2500)
+                await self._safe_goto(self._get_tab_url(url, "3"), wait_until="domcontentloaded")
+                await self.page.wait_for_selector(data_selector, timeout=10000)
+
+                lotes_str = current_attempt_data.get("lotes", "Sin lotes")
+                has_lotes = False
+                if lotes_str != "Sin lotes" and lotes_str != "":
+                    match = re.search(r'(\d+)', lotes_str)
+                    if match and int(match.group(1)) > 1:
+                        has_lotes = True
+
+                if not has_lotes:
+                    # Single lot
+                    h4 = await self.page.query_selector("h4")
+                    bienes_data = await self._extract_table_data()
+                    if h4:
+                        bienes_data["bien"] = await h4.inner_text()
+                    current_attempt_data["tipologia"] = self._extract_tipologia(bienes_data.get("bien", ""))
+                    current_attempt_data.update(bienes_data)
+                else:
+                    # Multi lot
+                    num_lotes = int(re.search(r'(\d+)', lotes_str).group(1))
+                    lots_data = []
+                    for i in range(1, num_lotes + 1):
+                        lot_url = self._get_lot_url(url, i)
+                        await StealthManager.human_delay(800, 1500)
+                        await self._safe_goto(lot_url, wait_until="domcontentloaded")
+                        await self.page.wait_for_selector(data_selector, timeout=10000)
+
+                        lot_header = await self.page.query_selector("h4")
+                        lot_header_text = await lot_header.inner_text() if lot_header else ""
+
+                        lot_table = await self._extract_table_data()
+                        lot_info = {"lote_numero": i}
+                        lot_info.update(lot_table)
+
+                        # Ensure 'bien' is captured from the H4 header if not in table
+                        if not lot_info.get("bien"):
+                            lot_info["bien"] = lot_header_text
+
+                        lot_info["tipologia"] = self._extract_tipologia(lot_info.get("bien", ""))
+                        lots_data.append(lot_info)
+                    current_attempt_data["lots_data"] = lots_data
+
+                # NEW: Check for bids if the auction is concluded to classify "Cesión de remate"
+                # We do this check only if specifically requested or if it's already concluded
+                # (For performance, we don't always check Tab 4)
+
+                # FINAL VALIDATION
+                if current_attempt_data.get("descripcion") or (has_lotes and current_attempt_data.get("lots_data")):
+                    return current_attempt_data
+                else:
+                    logger.warning(f"Incomplete extraction on attempt {attempt}. Retrying...")
+                    await asyncio.sleep(2)
+
+            except Exception as e:
+                logger.error(f"Attempt {attempt} failed for {url}: {e}")
+                if attempt == max_retries - 1:
+                    await self.log_diagnostic(f"fail_{current_attempt_data.get('identificador', 'unknown')}")
+                    return current_attempt_data
+                await asyncio.sleep(3)
+
+        return details
+
+
+    def _get_tab_url(self, base_url, ver_value):
+        parsed = urlparse(base_url)
+        query = parse_qs(parsed.query)
+        query['ver'] = [ver_value]
+        if 'idLote' in query: del query['idLote']
+        new_query = urlencode(query, doseq=True)
+        return urlunparse(parsed._replace(query=new_query))
+
+    def _get_lot_url(self, base_url, lot_index):
+        parsed = urlparse(base_url)
+        query = parse_qs(parsed.query)
+        query['ver'] = ["3"]
+        query['idLote'] = [str(lot_index)]
+        new_query = urlencode(query, doseq=True)
+        return urlunparse(parsed._replace(query=new_query))
+
+    async def check_no_bids(self, url):
+        """Navigates to Pujas tab and returns True if no bids were found."""
+        # Ensure we are on the base page to find the tab
+        await self._safe_goto(url, wait_until="domcontentloaded")
+
+        # Try to find the 'Pujas' tab link
+        pujas_tab = await self.page.query_selector("a:has-text('Pujas')")
+        pujas_url = None
+        if pujas_tab:
+            pujas_url = await pujas_tab.get_attribute("href")
+            if pujas_url and not pujas_url.startswith("http"):
+                pujas_url = self.BASE_URL + pujas_url.lstrip("./")
+
+        # Fallback to standard tab IDs if not found
+        if not pujas_url:
+            for v in ["5", "4"]:
+                test_url = self._get_tab_url(url, v)
+                await self._safe_goto(test_url, wait_until="domcontentloaded")
+                body_text = await self.page.inner_text("body")
+                if "Pujas" in body_text:
+                    pujas_url = test_url
+                    break
+
+        if not pujas_url:
+            logger.warning(f"Could not find Pujas tab for {url}")
+            return False
+
+        logger.info(f"Checking bids for classification: {pujas_url}")
+        if self.page.url != pujas_url:
+            await self._safe_goto(pujas_url, wait_until="domcontentloaded")
+
+        text = await self.page.inner_text("body")
+        text_up = text.upper()
+
+        # Explicit no-bids text
+        no_bids_indicators = [
+            "NO EXISTEN PUJAS",
+            "NO SE HAN REALIZADO PUJAS",
+            "NO HAY PUJAS",
+            "NO SE HAN ENCONTRADO PUJAS"
+        ]
+
+        if any(indicator in text_up for indicator in no_bids_indicators):
+            return True
+
+        # Check for bid table headers.
+        if "IMPORTE DE LA PUJA" in text_up or "FECHA DE LA PUJA" in text_up:
+            return False
+
+        # If no indicators and no bid headers, check if there's any table in the data block
+        # If table exists, check if it has more than just the header row
+        table = await self.page.query_selector("#idBloqueDatos1 table, table.tablaFormulario")
+        if not table:
+            return True
+
+        rows = await table.query_selector_all("tr")
+        # If only 1 row, it's likely just a header or empty
+        return len(rows) <= 1
+
+    async def get_portal_status_text(self, url):
+        """Extracts the exact status text from the identification page notices."""
+        await self._safe_goto(url, wait_until="domcontentloaded")
+
+        notices = await self.page.query_selector_all("#contenido .aviso")
+        for notice in notices:
+            text = await notice.inner_text()
+            text_up = text.upper()
+            if "CONCLUIDO POR EL PORTAL" in text_up or "CERRADA POR EL PORTAL" in text_up:
+                return "Concluida por el portal"
+            if "FINALIZADA" in text_up:
+                return "Finalizada"
+            if "CANCELADA" in text_up or "SUSPENDIDA" in text_up:
+                return "Suspendida"
+
+        return "Concluida"
+
+    async def _extract_table_data(self):
+        data = {}
+        # Strategy: find all THs and their next siblings
+        try:
+            ths = await self.page.query_selector_all("th")
+            for th in ths:
+                try:
+                    key_raw = await th.inner_text()
+                    if not key_raw: continue
+
+                    value = await self.page.evaluate("(element) => element.nextElementSibling ? element.nextElementSibling.innerText : ''", th)
+
+                    clean_key = unidecode(key_raw.strip().lower().replace(" ", "_").replace(":", "").replace("\n", ""))
+
+                    mapping = {
+                        "identificador": "identificador",
+                        "codigo_postal": "codigo_postal",
+                        "tasacion": "tasacion",
+                        "puja_minima": "puja_minima",
+                        "deposito": "importe_del_deposito",
+                        "valor_subasta": "valor_subasta",
+                        "cantidad_reclamada": "cantidad_reclamada",
+                        "fecha_de_inicio": "fecha_de_inicio",
+                        "fecha_de_conclusion": "fecha_de_conclusion",
+                        "inicio_de_la_subasta": "fecha_de_inicio",
+                        "conclusion_de_la_subasta": "fecha_de_conclusion",
+                        "codigo": "codigo",
+                        "telefono": "telefono",
+                        "correo_electronico": "correo_electronico",
+                        "descripcion": "descripcion",
+                        "direccion": "direccion",
+                        "vivienda_habitual": "vivienda_habitual",
+                        "situacion_posesoria": "situacion_posesoria",
+                        "bien": "bien",
+                        "tipo_de_bien": "bien",
+                        "clase_de_bien": "bien"
+                    }
+
+                    for k, v in mapping.items():
+                        if k in clean_key:
+                            clean_key = v
+                            break
+
+                    if value:
+                        data[clean_key] = value.strip()
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return data
+
+    def _extract_tipologia(self, bien_text):
+        if not bien_text: return ""
+        # Common pattern: "Inmueble (Vivienda)" -> "Vivienda"
+        match = re.search(r'\(([^)]+)\)', bien_text)
+        if match:
+            return match.group(1).strip()
+
+        # Fallback for patterns like "Bien 1 - Inmueble Vivienda" or just "Vivienda"
+        # If there are no parens, we take everything after the last "-" or just the whole string if short
+        if " - " in bien_text:
+            parts = bien_text.split(" - ")
+            candidate = parts[-1].strip()
+            return candidate
+
+        return bien_text.strip()
