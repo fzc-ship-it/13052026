@@ -50,7 +50,7 @@ async def run_sync(headless=True, days=0):
         await scraper.select_property_type()
         await scraper.select_auction_status("PU")
         await scraper.perform_search()
-        upcoming_scan = await scraper.scan_all_results("PU")
+        upcoming_scan, pu_complete = await scraper.scan_all_results("PU")
         portal_data.update(upcoming_scan)
 
         logger.info("--- STEP 2: Scanning ACTIVE auctions (Global) ---")
@@ -58,7 +58,7 @@ async def run_sync(headless=True, days=0):
         await scraper.select_property_type()
         await scraper.select_auction_status("EJ")
         await scraper.perform_search()
-        active_scan = await scraper.scan_all_results("EJ")
+        active_scan, ej_complete = await scraper.scan_all_results("EJ")
         portal_data.update(active_scan)
 
         # 2. TRANSITION PHASE: Detect status changes for local records
@@ -73,7 +73,8 @@ async def run_sync(headless=True, days=0):
                 logger.info(f"Transition: {ident} is now ACTIVE")
                 db.update_auction_status(ident, "EJ")
                 stats["transitions"] += 1
-            elif ident not in portal_data:
+            elif pu_complete and ej_complete and ident not in portal_data:
+                # ONLY transition to concluded if we are SURE we scanned everything
                 logger.info(f"Transition: {ident} (UPCOMING) DISAPPEARED - Likely concluded or closed")
                 url = local_upcoming[ident]
                 await handle_concluded_classification(scraper, db, ident, url)
@@ -81,7 +82,8 @@ async def run_sync(headless=True, days=0):
 
         # Transition: Active -> Concluded
         for ident in local_active:
-            if ident not in active_scan:
+            if ej_complete and ident not in active_scan:
+                # ONLY transition to concluded if we are SURE the active scan was full
                 logger.info(f"Transition: {ident} (ACTIVE) is now CONCLUDED")
                 url = local_active[ident]
                 await handle_concluded_classification(scraper, db, ident, url)
@@ -105,7 +107,7 @@ async def run_sync(headless=True, days=0):
                 await scraper.select_auction_status(hist_status)
                 await scraper.set_date_range("fin", date_str, today_str)
                 await scraper.perform_search()
-                hist_scan = await scraper.scan_all_results(hist_status)
+                hist_scan, hist_complete = await scraper.scan_all_results(hist_status)
 
                 for ident, data in hist_scan.items():
                     if not db.auction_exists(ident):

@@ -142,8 +142,28 @@ class BOEScraper:
         await self.page.wait_for_load_state("domcontentloaded")
         await StealthManager.human_delay(1000, 2500)
 
+    async def get_total_results_count(self):
+        """Parses the total count of results from the 'Resultados 1 a 50 de X' text."""
+        try:
+            elem = await self.page.query_selector(".paginar p")
+            if elem:
+                text = await elem.inner_text()
+                # Pattern: "Resultados 1 a 50 de 1.119"
+                match = re.search(r'de\s+([\d\.]+)', text)
+                if match:
+                    return int(match.group(1).replace(".", ""))
+        except Exception as e:
+            logger.warning(f"Could not parse total results count: {e}")
+        return 0
+
     async def get_auction_results(self):
         """Captures URL and current status text from the search result list."""
+        # Ensure at least some results are loaded
+        try:
+            await self.page.wait_for_selector("li.resultado-busqueda", timeout=10000)
+        except Exception:
+            return {}
+
         results = {}
         items = await self.page.query_selector_all("li.resultado-busqueda")
         for item in items:
@@ -168,25 +188,70 @@ class BOEScraper:
                         results[ident] = {"url": href, "portal_status": status_text}
         return results
 
+    async def get_pagination_info(self):
+        """Returns (current_start, current_end, total_count) from pagination text."""
+        try:
+            elem = await self.page.query_selector(".paginar p")
+            if elem:
+                text = await elem.inner_text()
+                # Pattern: "Resultados 1 a 50 de 1.119"
+                match = re.search(r'Resultados\s+([\d\.]+)\s+a\s+([\d\.]+)\s+de\s+([\d\.]+)', text)
+                if match:
+                    start = int(match.group(1).replace(".", ""))
+                    end = int(match.group(2).replace(".", ""))
+                    total = int(match.group(3).replace(".", ""))
+                    return start, end, total
+        except Exception:
+            pass
+        return 0, 0, 0
+
     async def has_next_page(self):
-        # The BOE portal uses text 'siguiente' for pagination links
-        next_button = await self.page.query_selector("a:has-text('siguiente')")
-        return next_button is not None
+        _, end, total = await self.get_pagination_info()
+        if total > 0 and end < total:
+            # Also check if the button exists just in case
+            btn = await self.page.query_selector("a:has-text('siguiente')")
+            return btn is not None
+        return False
 
     async def go_to_next_page(self):
         next_button = await self.page.query_selector("a:has-text('siguiente')")
         if next_button:
-            logger.info("Navigating to next page of results...")
+            _, end, _ = await self.get_pagination_info()
+            logger.info(f"Navigating to next page (starting from {end + 1})...")
             await next_button.click()
-            await self.page.wait_for_load_state("domcontentloaded")
+            # Wait for the specific page markers to change to ensure load
+            try:
+                await self.page.wait_for_function(
+                    f"() => {{ const p = document.querySelector('.paginar p'); return p && !p.innerText.includes(' {end} '); }}",
+                    timeout=15000
+                )
+            except Exception:
+                await self.page.wait_for_load_state("domcontentloaded")
             await StealthManager.human_delay(1000, 2500)
 
     async def scan_all_results(self, status_code):
-        """Iterates pages and returns {ident: {url, portal_status, status_code}}."""
+        """Iterates pages and returns ({results}, is_complete)."""
         all_results = {}
-        logger.info(f"Scanning pages for status {status_code}...")
+        expected_total = await self.get_total_results_count()
+        logger.info(f"Scanning pages for status {status_code} (Expected: {expected_total})...")
+
+        consecutive_empty_pages = 0
         while True:
             page_results = await self.get_auction_results()
+
+            if not page_results and expected_total > len(all_results):
+                consecutive_empty_pages += 1
+                if consecutive_empty_pages <= 2:
+                    logger.warning(f"Empty page detected. Retry {consecutive_empty_pages}/2...")
+                    await asyncio.sleep(5)
+                    await self.page.reload(wait_until="domcontentloaded")
+                    continue
+                else:
+                    logger.error("Consecutive empty pages. Stopping scan to prevent data corruption.")
+                    break
+
+            consecutive_empty_pages = 0
+
             for ident, data in page_results.items():
                 data["status_code"] = status_code
                 all_results[ident] = data
@@ -195,7 +260,18 @@ class BOEScraper:
                 await self.go_to_next_page()
             else:
                 break
-        return all_results
+
+        is_complete = True
+        if expected_total > 0:
+            found_count = len(all_results)
+            # Allow minor discrepancy (e.g. 1-2 items) but not massive
+            if found_count < (expected_total * 0.95):
+                logger.error(f"Scan incomplete for {status_code}: Found {found_count}/{expected_total}")
+                is_complete = False
+            else:
+                logger.info(f"Scan verified for {status_code}: Found {found_count}/{expected_total}")
+
+        return all_results, is_complete
 
     async def extract_auction_details(self, url):
         """Comprehensive extraction with strict verification of 13 key fields."""

@@ -93,8 +93,9 @@ class DatabaseManager:
     def get_incomplete_auctions(self):
         """Identifies auctions with missing critical fields or no lot data."""
         # Note: we exclude Cesión de Remate (CR) because they intentionally have no bids/lots info in some cases
+        # Also, use DISTINCT to avoid multiple rows per auction if it has lots but other fields are missing
         query = """
-            SELECT a.identificador, a.url
+            SELECT DISTINCT a.identificador, a.url
             FROM auctions a
             LEFT JOIN lots l ON a.identificador = l.auction_id
             WHERE (l.id IS NULL
@@ -102,7 +103,7 @@ class DatabaseManager:
                OR a.fecha_conclusion IS NULL OR a.fecha_conclusion = ''
                OR a.autoridad_gestora_codigo IS NULL OR a.autoridad_gestora_codigo = ''
                OR l.bien_descripcion IS NULL OR l.bien_descripcion = ''
-            ) AND a.estado_proceso NOT IN ('Cesión de remate', 'Concluida por el portal')
+            ) AND a.estado_proceso NOT IN ('Cesión de remate', 'Concluida por el portal', 'Suspendida')
         """
         with sqlite3.connect(self.db_name) as conn:
             conn.row_factory = sqlite3.Row
