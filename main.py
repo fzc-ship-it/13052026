@@ -182,10 +182,16 @@ async def run_sync(headless=True, days=0):
                 logger.error(f"Error processing auction {ident}: {e}")
 
         logger.info(f"SYNC COMPLETED.")
-        logger.info(f"SUMMARY:")
-        logger.info(f" - New auctions scraped: {processed_count}")
-        logger.info(f" - Status transitions handled: {stats['transitions']}")
-        logger.info(f" - Historical re-evaluations: {stats['re_evaluated']}")
+        # Final counts in DB
+        counts = db.get_status_counts()
+        logger.info(f"SYNC COMPLETED SUCCESSFULLY.")
+        logger.info(f"--- SUMMARY OF CHANGES IN THIS RUN ---")
+        logger.info(f" - New auctions added: {processed_count}")
+        logger.info(f" - Status transitions detected: {stats['transitions']}")
+        logger.info(f" - Records re-evaluated/repaired: {stats['re_evaluated']}")
+        logger.info(f"--- DATABASE TOTALS (All runs combined) ---")
+        for status, count in counts.items():
+            logger.info(f" - {status}: {count}")
 
     except Exception as e:
         logger.critical(f"Sync failed due to critical error: {e}")

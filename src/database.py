@@ -5,15 +5,15 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-STATUS_MAPPING = {
-    "PU": "Próxima apertura",
-    "EJ": "Celebrándose",
-    "PC": "Concluida",
-    "FS": "Finalizada",
-    "CR": "Cesión de remate"
-}
-
 class DatabaseManager:
+    STATUS_MAPPING = {
+        "PU": "Próxima apertura",
+        "EJ": "Celebrándose",
+        "PC": "Concluida",
+        "FS": "Finalizada",
+        "CR": "Cesión de remate"
+    }
+
     def __init__(self, db_name="boe_auctions.db"):
         self.db_name = db_name
         self._init_db()
@@ -74,7 +74,7 @@ class DatabaseManager:
             return cursor.fetchone() is not None
 
     def update_auction_status(self, identificador, new_status_code):
-        status_desc = STATUS_MAPPING.get(new_status_code, new_status_code)
+        status_desc = self.STATUS_MAPPING.get(new_status_code, new_status_code)
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE auctions SET estado_proceso = ?, last_updated = ? WHERE identificador = ?",
@@ -125,7 +125,7 @@ class DatabaseManager:
         if not identificador:
             return
 
-        estado_desc = STATUS_MAPPING.get(status_code, status_code)
+        estado_desc = self.STATUS_MAPPING.get(status_code, status_code)
         tiene_lotes = 1 if auction_data.get("lotes") and auction_data.get("lotes") != "Sin lotes" else 0
 
         with sqlite3.connect(self.db_name) as conn:
